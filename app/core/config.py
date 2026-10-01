@@ -18,10 +18,10 @@ class Settings(BaseSettings):
     )
 
     # App Info
-    app_name: str = Field(default="FastAPI Application", alias="APP_NAME")
+    app_name: str = Field(default="AI OCR Advance API", alias="APP_NAME")
     environment: str = Field(default="development", alias="ENVIRONMENT")
     debug: bool = Field(default=True, alias="DEBUG")
-    version: str = Field(default="0.1.0", alias="VERSION")
+    version: str = Field(default="1.0.0", alias="VERSION")
     api_v1_prefix: str = Field(default="/api/v1", alias="API_V1_PREFIX")
 
     # Server / Gunicorn / Uvicorn settings
@@ -35,6 +35,38 @@ class Settings(BaseSettings):
         default=["*"],
         alias="ALLOWED_ORIGINS",
     )
+
+    # Document & OCR Configuration
+    max_upload_size_mb: int = Field(default=25, alias="MAX_UPLOAD_SIZE_MB")
+    max_pdf_pages: int = Field(default=50, alias="MAX_PDF_PAGES")
+    ocr_language: str = Field(default="en", alias="OCR_LANGUAGE")
+    ocr_timeout: int = Field(default=60, alias="OCR_TIMEOUT")
+    ai_timeout: int = Field(default=45, alias="AI_TIMEOUT")
+
+    # DeepSeek Configuration
+    deepseek_api_key: str = Field(default="", alias="DEEPSEEK_API_KEY")
+    deepseek_model: str = Field(default="deepseek-chat", alias="DEEPSEEK_MODEL")
+    deepseek_base_url: str = Field(default="https://api.deepseek.com/v1", alias="DEEPSEEK_BASE_URL")
+
+    # Allowed Extensions & MIME Types
+    allowed_extensions: List[str] = [
+        ".pdf",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".tiff",
+        ".tif",
+    ]
+
+    allowed_mime_types: List[str] = [
+        "application/pdf",
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/webp",
+        "image/tiff",
+    ]
 
     @field_validator("allowed_origins", mode="before")
     @classmethod

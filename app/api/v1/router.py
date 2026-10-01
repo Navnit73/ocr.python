@@ -5,10 +5,12 @@ API v1 Router.
 from datetime import datetime, timezone
 from fastapi import APIRouter
 
-router = APIRouter(tags=["API v1"])
+from app.api.v1.endpoints.ocr import router as ocr_router
 
+router = APIRouter()
 
-@router.get("/health", summary="API v1 Health Check")
+# Health & Diagnostic Endpoints
+@router.get("/health", tags=["Health"], summary="API v1 Health Check")
 async def health_check():
     """Health check endpoint."""
     return {
@@ -18,7 +20,11 @@ async def health_check():
     }
 
 
-@router.get("/ping", summary="Ping Check")
+@router.get("/ping", tags=["Health"], summary="Ping Check")
 async def ping():
     """Simple ping check for uptime monitors."""
     return {"ping": "pong"}
+
+
+# Include OCR Endpoints
+router.include_router(ocr_router)
