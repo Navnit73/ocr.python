@@ -37,11 +37,13 @@ class Settings(BaseSettings):
     )
 
     # Document & OCR Configuration
-    max_upload_size_mb: int = Field(default=25, alias="MAX_UPLOAD_SIZE_MB")
-    max_pdf_pages: int = Field(default=50, alias="MAX_PDF_PAGES")
+    max_upload_size_mb: int = Field(default=100, alias="MAX_UPLOAD_SIZE_MB")
+    max_pdf_pages: int = Field(default=200, alias="MAX_PDF_PAGES")
+    max_batch_files: int = Field(default=50, alias="MAX_BATCH_FILES")
     ocr_language: str = Field(default="en", alias="OCR_LANGUAGE")
-    ocr_timeout: int = Field(default=60, alias="OCR_TIMEOUT")
-    ai_timeout: int = Field(default=45, alias="AI_TIMEOUT")
+    ocr_timeout: int = Field(default=120, alias="OCR_TIMEOUT")
+    ai_timeout: int = Field(default=60, alias="AI_TIMEOUT")
+    webhook_timeout: int = Field(default=15, alias="WEBHOOK_TIMEOUT")
 
     # DeepSeek Configuration
     deepseek_api_key: str = Field(default="", alias="DEEPSEEK_API_KEY")

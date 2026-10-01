@@ -1,5 +1,5 @@
 """
-FastAPI Application Entry Point.
+FastAPI Application Entry Point with Rich OpenAPI / Swagger Documentation.
 """
 
 from contextlib import asynccontextmanager
@@ -36,10 +36,46 @@ def create_application() -> FastAPI:
     """Factory function to build and configure the FastAPI application."""
     settings = get_settings()
 
+    tags_metadata = [
+        {
+            "name": "OCR & Extraction",
+            "description": (
+                "High-performance, stateless document OCR and 3-Layer structured data extraction. "
+                "Supports PDFs up to **200 pages / 100MB**, scanned images, password-protected PDFs, "
+                "parallel batch extraction (up to 50 files / Zip archives), and asynchronous callback webhooks."
+            ),
+        },
+        {
+            "name": "Export & Accounting Downloads",
+            "description": (
+                "Instant multi-format exports for financial accounting and reporting:\n"
+                "- **Executive Excel (.xlsx)**: Multi-sheet workbook with KPI Dashboard & Transaction Ledger\n"
+                "- **Fintech-Styled PDF (.pdf)**: Executive report with KPI cards, category progress bars, and audit summary\n"
+                "- **Accounting Direct (.ofx / .qbo / .qif)**: 1-click import into QuickBooks, Xero, Zoho Books, Tally\n"
+                "- **Annual Consolidation**: Merges multi-month statements into a 12-month Annual Cashflow & P&L report."
+            ),
+        },
+        {
+            "name": "Health",
+            "description": "System liveness, readiness, and connectivity health check endpoints.",
+        },
+    ]
+
     app = FastAPI(
         title=settings.app_name,
         version=settings.version,
-        description="Stateless AI-Powered OCR & Structured Document Extraction API.",
+        description=(
+            "### 🚀 Enterprise AI-Powered Document OCR & Financial Intelligence API\n\n"
+            "An ultra-fast, stateless REST API to extract, clean, structure, and export documents:\n\n"
+            "- **Supported Documents**: Bank Statements, Invoices, Receipts, Tax Docs, General PDFs & Scanned Images\n"
+            "- **Capacity**: Up to **200 pages** per PDF and up to **100MB** payload size\n"
+            "- **3-Layer Output**: Layer 1 (Raw OCR), Layer 2 (Prompt-Injection-Safe Cleaned Text), Layer 3 (Pydantic-Validated Structured JSON)\n"
+            "- **Financial Integrity**: Mathematical balance audits and tax validation preserving raw source figures\n"
+            "- **Accounting Direct Exports**: Direct `.ofx`, `.qbo` (QuickBooks), `.qif`, `.xlsx`, `.pdf`, and `.csv` generation\n"
+            "- **Batch & Webhooks**: Parallel multi-file/Zip processing and signed async webhooks (`callback_url`)\n"
+            "- **Stateless**: No MongoDB, Redis, or Celery required. In-memory TTL caching with guaranteed temporary file cleanup."
+        ),
+        openapi_tags=tags_metadata,
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",

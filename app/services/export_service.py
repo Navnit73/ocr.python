@@ -118,8 +118,23 @@ class ExportService:
             file_bytes = cls.generate_pdf(doc_id, document_type, data, analytics, raw_text)
             media_type = "application/pdf"
             filename = f"{document_type}_{doc_id}.pdf"
+        elif fmt == ExportFormatEnum.OFX.value:
+            from app.services.accounting_export_service import AccountingExportService
+            file_bytes = AccountingExportService.generate_ofx(doc_id, document_type, data, is_qbo=False)
+            media_type = "application/x-ofx"
+            filename = f"{document_type}_{doc_id}.ofx"
+        elif fmt == ExportFormatEnum.QBO.value:
+            from app.services.accounting_export_service import AccountingExportService
+            file_bytes = AccountingExportService.generate_ofx(doc_id, document_type, data, is_qbo=True)
+            media_type = "application/vnd.intu.qbo"
+            filename = f"{document_type}_{doc_id}.qbo"
+        elif fmt == ExportFormatEnum.QIF.value:
+            from app.services.accounting_export_service import AccountingExportService
+            file_bytes = AccountingExportService.generate_qif(doc_id, document_type, data)
+            media_type = "application/x-qif"
+            filename = f"{document_type}_{doc_id}.qif"
         else:
-            raise ValueError(f"Unsupported export format '{export_format}'. Choose 'xlsx', 'csv', or 'pdf'.")
+            raise ValueError(f"Unsupported export format '{export_format}'. Choose 'xlsx', 'csv', 'pdf', 'ofx', 'qbo', or 'qif'.")
 
         return file_bytes, media_type, filename
 

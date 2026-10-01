@@ -29,6 +29,7 @@ class ExtractionStatus(str, Enum):
     SUCCESS = "success"
     PARTIAL_SUCCESS = "partial_success"
     ERROR = "error"
+    FAILED = "failed"
 
 
 class OCRBoundingBox(BaseModel):

@@ -43,8 +43,8 @@ async def test_validate_unsupported_extension():
 
 @pytest.mark.asyncio
 async def test_validate_file_size_exceeded():
-    # 30MB file with 25MB limit
-    large_content = b"%PDF-" + b"0" * (26 * 1024 * 1024)
+    # 101MB file exceeding 100MB limit
+    large_content = b"%PDF-" + b"0" * (101 * 1024 * 1024)
     upload = UploadFile(filename="large.pdf", file=io.BytesIO(large_content))
     with pytest.raises(HTTPException) as exc_info:
         await FileValidator.validate_upload(upload)

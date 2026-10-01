@@ -1,174 +1,190 @@
 # AI OCR Advance API
 
-A lightweight, high-performance, stateless AI-powered OCR & Document Extraction API built with **FastAPI**, **PyMuPDF**, **PaddleOCR**, **OpenCV**, and the **DeepSeek API**.
+A lightweight, enterprise-grade, high-performance, stateless AI-powered OCR & Financial Document Extraction API built with **FastAPI**, **PyMuPDF**, **PaddleOCR**, **OpenCV**, and the **DeepSeek API**.
 
-The API accepts PDF documents and images (bank statements, receipts, invoices, general documents), extracts text, cleans/normalizes OCR artifacts, and returns validated 3-layer structured JSON with unique request tracking.
+The API accepts large multi-page PDF documents (up to **200 pages** and **100MB**) and images, extracts text via OCR, cleans and normalizes OCR artifacts using DeepSeek, structures financial entities into validated Pydantic models, and generates executive downloads for Excel, PDF, CSV, and accounting software (**QuickBooks QBO**, **OFX**, **Quicken QIF**).
 
 ---
 
-## ✨ Key Features
+## ✨ Key Features & Capabilities
 
-- **Stateless & Secure**: No database, no Mongo, no Cloudinary, no permanent file retention. Temporary files are safely cleaned up in `finally` blocks.
-- **Frontend Request ID Support**: Frontend can pass a custom `request_id` in form-data or via the `X-Request-ID` header; the API echoes this ID back in responses and error logs.
-- **3-Layer Output Architecture**:
-  - **Layer 1 (Raw OCR)**: Unmodified text extracted via PyMuPDF / PaddleOCR.
+- **🚀 High Capacity**: Supports documents up to **200 pages** per PDF and up to **100MB** payload size.
+- **🔒 Stateless & Secure**: Zero persistent storage (no MongoDB, Redis, or Celery). Temporary files are guaranteed to be cleaned up in `finally` blocks.
+- **⚡ Password-Protected PDFs**: Decrypt and extract password-protected statements and invoices on-the-fly.
+- **🧠 3-Layer Output Architecture**:
+  - **Layer 1 (Raw OCR)**: Exact, unmodified text extracted via PyMuPDF (digital) or PaddleOCR (scanned).
   - **Layer 2 (Cleaned Text)**: DeepSeek-corrected and normalized text with prompt-injection defense.
-  - **Layer 3 (Structured JSON)**: Typed Pydantic models for bank statements, receipts, invoices, and general documents with financial arithmetic checks.
-- **High Performance & Async**: Digital PDFs are extracted directly via PyMuPDF without heavy OCR rendering; scanned pages and images run through OpenCV preprocessing and PaddleOCR inside worker thread pools.
+  - **Layer 3 (Structured JSON)**: Typed Pydantic models for bank statements, receipts, invoices, and general documents with financial balance audits.
+- **💼 Accounting Direct Exports**:
+  - **QuickBooks Online (`.qbo`)**: 1-click import into QuickBooks with `<INTU.BID>3000`.
+  - **Open Financial Exchange (`.ofx`)**: Compatible with Xero, Zoho Books, Tally, Sage.
+  - **Quicken Interchange (`.qif`)**: Standard desktop Quicken import.
+  - **Executive Excel (`.xlsx`)**: Multi-sheet workbook with KPI Dashboard, Expense Breakdown, and Transaction Ledger.
+  - **Fintech PDF (`.pdf`)**: Corporate executive report with KPI cards, category progress bars, and audit summary.
+  - **Standard CSV (`.csv`)**: RFC 4180 compliant CSV.
+- **📦 Batch Processing & Zip Archives (`POST /api/v1/ocr/batch`)**:
+  - Upload up to 50 files or a single `.zip` file in a single request.
+  - Concurrently processes all documents with worker thread isolation.
+- **🔔 Async Webhook Callbacks**:
+  - Pass `callback_url` to return `202 Accepted` immediately.
+  - Asynchronously dispatches HMAC-SHA256 signed JSON payloads (`X-Webhook-Signature`).
+- **📈 Multi-Statement Annual Consolidation (`POST /api/v1/export/consolidate`)**:
+  - Merge up to 12+ monthly statements into a single annual P&L cashflow workbook with transaction deduplication.
 
 ---
 
-## 📁 Project Architecture
+## 🌐 Interactive Swagger UI & API Docs
 
-```
-ocr.advance/
-├── app/
-│   ├── api/
-│   │   └── v1/
-│   │       ├── endpoints/
-│   │       │   └── ocr.py          # POST /api/v1/ocr/extract endpoint
-│   │       └── router.py           # API v1 routes & health checks
-│   ├── core/
-│   │   └── config.py               # Pydantic Settings & environment config
-│   ├── schemas/
-│   │   ├── bank_statement.py       # Bank statement transactions & balance models
-│   │   ├── receipt.py              # Receipt items, taxes, and total models
-│   │   ├── invoice.py              # Invoice line items, tax, supplier/buyer models
-│   │   ├── general.py              # Key-value pairs and summary models
-│   │   └── ocr.py                  # 3-layer response, page, and metadata schemas
-│   ├── services/
-│   │   ├── file_validator.py       # File size, extension, magic signature checks & temp cleanup
-│   │   ├── pdf_service.py          # PyMuPDF digital text extraction & scanned page rendering
-│   │   ├── image_service.py        # OpenCV & Pillow contrast/deskew preprocessing
-│   │   ├── ocr_service.py          # PaddleOCR engine with thread pool execution
-│   │   ├── deepseek_client.py      # Async DeepSeek client with retries & timeouts
-│   │   ├── ai_cleaner.py           # DeepSeek OCR text cleaning & normalization
-│   │   ├── classifier.py           # Rule-based & AI document classification
-│   │   ├── extractor.py            # Structured extraction & financial arithmetic auditing
-│   │   └── pipeline.py             # Master pipeline orchestrator
-│   └── main.py                     # FastAPI entry point, CORS, and error handlers
-├── Dockerfile                      # Production container build
-├── gunicorn_conf.py                # Gunicorn multi-worker configuration
-├── requirements.txt                # Project dependencies
-├── tests/                          # Automated Pytest test suite
-└── README.md
-```
+FastAPI provides an interactive OpenAPI / Swagger UI testbed out of the box:
+
+- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **ReDoc UI**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
+- **OpenAPI JSON**: [http://localhost:8000/openapi.json](http://localhost:8000/openapi.json)
+
+### How to Use Swagger UI (`/docs`)
+1. Open [http://localhost:8000/docs](http://localhost:8000/docs) in your browser.
+2. Click on any endpoint to expand it (e.g., `POST /api/v1/ocr/extract`).
+3. Click the **"Try it out"** button in the top-right corner of the endpoint panel.
+4. Fill in the form fields:
+   - Click **"Choose File"** and select your PDF or image.
+   - Set `document_type` to `auto` or specific type (e.g., `bank_statement`).
+   - If password-protected, fill in `password`.
+   - To receive an async webhook, fill in `callback_url`.
+5. Click **"Execute"** to send the request.
+6. View the real-time formatted JSON response and timing breakdown in `metadata.stage_timings_ms`.
 
 ---
 
-## 📡 API Specification
+## 📡 API Reference & Endpoints
 
-### `POST /api/v1/ocr/extract`
+### 1. Document OCR & Extraction
 
-Extracts text and structured financial data from an uploaded file.
+#### `POST /api/v1/ocr/extract`
+Extracts text and structured financial data from a single document.
 
-#### Multipart Form Parameters:
-| Field | Type | Required | Description | Default |
-|---|---|---|---|---|
-| `file` | Binary File | **Yes** | PDF, JPG, PNG, WEBP, or TIFF | - |
-| `document_type` | String | No | `auto`, `bank_statement`, `receipt`, `invoice`, `general` | `auto` |
-| `language` | String | No | OCR language hint (`auto`, `en`, `hi`, `es`, `fr`, `de`, `ch`) | `en` |
-| `clean_with_ai` | Boolean | No | Whether to perform DeepSeek cleaning and structured extraction | `true` |
-| `request_id` | String | No | Custom ID provided by frontend to correlate documents | Auto UUID |
-| `password` | String | No | Password for password-protected / encrypted PDF files | `null` |
+- **Parameters (`multipart/form-data`)**:
+  - `file` (*required*, file): PDF (up to 200 pages), JPG, PNG, WEBP, or TIFF.
+  - `document_type` (string, default `auto`): `auto`, `bank_statement`, `receipt`, `invoice`, `general`.
+  - `language` (string, default `en`): `auto`, `en`, `hi`, `es`, `fr`, `de`, `ch`.
+  - `clean_with_ai` (boolean, default `true`): DeepSeek cleaning & structured extraction.
+  - `request_id` (string, optional): Client-provided request tracking ID.
+  - `password` (string, optional): Password for encrypted PDF files.
+  - `callback_url` (string, optional): Webhook URL for asynchronous delivery (`202 Accepted`).
+  - `callback_secret` (string, optional): HMAC secret for `X-Webhook-Signature` validation.
 
-#### Example Response (`200 OK` — Bank Statement):
-```json
-{
-  "id": "req_frontend_99182",
-  "status": "success",
-  "document_type": "bank_statement",
-  "extraction": {
-    "bank_name": "Standard Bank",
-    "account_holder": "John Doe",
-    "account_number_masked": "XXXX-4321",
-    "currency": "USD",
-    "statement_period": "2026-01-01 to 2026-01-31",
-    "opening_balance": 5000.0,
-    "closing_balance": 5400.0,
-    "transactions": [
-      {
-        "date": "2026-01-05",
-        "description": "Utility Bill Payment",
-        "reference": "UPI982312",
-        "debit": 100.0,
-        "credit": null,
-        "balance": 4900.0
-      },
-      {
-        "date": "2026-01-10",
-        "description": "Client Wire Deposit",
-        "reference": "WIRE7712",
-        "debit": null,
-        "credit": 500.0,
-        "balance": 5400.0
-      }
-    ]
-  },
-  "raw_text": "Standard Bank Account Statement\nAccount: XXXX-4321...",
-  "cleaned_text": "Standard Bank Account Statement\nAccount: XXXX-4321...",
-  "pages": [
-    {
-      "page_number": 1,
-      "text": "Standard Bank...",
-      "confidence": 1.0,
-      "is_scanned": false,
-      "lines": []
-    }
-  ],
-  "metadata": {
-    "pages": 1,
-    "ocr_used": false,
-    "ocr_engine": "pymupdf_digital",
-    "ai_cleaned": true,
-    "ai_model": "deepseek-chat",
-    "processing_time_ms": 1420,
-    "stage_timings_ms": {
-      "validation": 2,
-      "ocr_extraction": 15,
-      "ai_cleaning": 520,
-      "classification": 1,
-      "structured_extraction": 880
-    }
-  },
-  "warnings": []
-}
+- **Example curl**:
+```bash
+curl -X POST "http://localhost:8000/api/v1/ocr/extract" \
+  -F "file=@statement_jan2026.pdf" \
+  -F "document_type=bank_statement" \
+  -F "clean_with_ai=true"
 ```
 
 ---
 
-### 📊 Document Export & Download Endpoints
+#### `POST /api/v1/ocr/batch`
+Processes up to 50 documents or a `.zip` archive containing invoices, receipts, or statements in parallel.
 
-#### 1. `GET /api/v1/export/download/{id}?format=xlsx|csv|pdf`
-Download a previously extracted document directly by entering its unique Request ID.
+- **Parameters (`multipart/form-data`)**:
+  - `files` (*required*, list of files or `.zip`): Batch of documents.
+  - `document_type` (string, default `auto`): Target document type hint.
+  - `language` (string, default `en`): OCR language hint.
+  - `clean_with_ai` (boolean, default `true`): DeepSeek processing.
+
+- **Example curl**:
+```bash
+curl -X POST "http://localhost:8000/api/v1/ocr/batch" \
+  -F "files=@invoices_q1.zip" \
+  -F "document_type=invoice"
+```
+
+---
+
+### 2. Export & Accounting Downloads
+
+#### `GET /api/v1/export/download/{id}?format=xlsx|pdf|csv|ofx|qbo|qif`
+Download an extracted document directly using its unique Request ID.
 
 - **Query Parameters**:
-  - `format` (optional): `xlsx` (default, beautiful styled Excel), `csv` (RFC 4180 CSV), or `pdf` (corporate formatted PDF).
-- **Responses**:
-  - `200 OK`: Binary file stream with `Content-Disposition: attachment; filename="<doc_type>_<id>.<ext>"`
-  - `404 Not Found`: If the document ID has expired from temporary memory or does not exist.
+  - `format` (default `xlsx`): `xlsx`, `pdf`, `csv`, `ofx`, `qbo`, `qif`.
 
-#### 2. `POST /api/v1/export/generate?format=xlsx|csv|pdf`
-Directly convert an extraction JSON response into a styled Excel, CSV, or PDF file for immediate download.
+- **Example curl**:
+```bash
+# Download Excel
+curl -OJ "http://localhost:8000/api/v1/export/download/req_12345?format=xlsx"
+
+# Download QuickBooks Online (.qbo)
+curl -OJ "http://localhost:8000/api/v1/export/download/req_12345?format=qbo"
+
+# Download OFX for Xero / Tally
+curl -OJ "http://localhost:8000/api/v1/export/download/req_12345?format=ofx"
+```
+
+---
+
+#### `POST /api/v1/export/generate?format=xlsx|pdf|csv|ofx|qbo|qif`
+Generate a styled file stream directly from an extraction JSON payload.
 
 - **Request Body**:
 ```json
 {
-  "id": "req_12345",
+  "id": "doc_991",
   "document_type": "bank_statement",
-  "extraction": { ... },
-  "raw_text": "..."
+  "extraction": {
+    "bank_name": "Chase Bank",
+    "account_holder": "Jane Doe",
+    "account_number_masked": "XXXX-1234",
+    "currency": "USD",
+    "statement_period": "2026-01-01 to 2026-01-31",
+    "opening_balance": 10000.00,
+    "closing_balance": 12500.00,
+    "transactions": [
+      {
+        "date": "2026-01-15",
+        "description": "Consulting Revenue",
+        "credit": 3000.00,
+        "debit": null,
+        "balance": 13000.00
+      },
+      {
+        "date": "2026-01-20",
+        "description": "Software Subscription",
+        "credit": null,
+        "debit": 500.00,
+        "balance": 12500.00
+      }
+    ]
+  }
 }
 ```
 
 ---
 
-## 🛠️ Setup & Running
+#### `POST /api/v1/export/consolidate?as_excel=true`
+Consolidates multiple extractions into an Annual / Multi-Month report.
 
-### 1. Environment Setup
+- **Request Body**:
+```json
+{
+  "title": "Fiscal Year 2026 Consolidated P&L",
+  "request_ids": ["req_jan", "req_feb", "req_mar"]
+}
+```
+- **Response**: Downloadable Multi-Sheet Excel Workbook with 12-Month Cashflow and Master Ledger (`as_excel=true`) or structured JSON analytics (`as_excel=false`).
+
+---
+
+## 🛠️ Setup & Local Development
+
+### 1. Requirements
+- Python 3.11+
+- Virtualenv
+
+### 2. Installation
 
 ```bash
-# Clone repository and enter directory
+# Clone the repository
+git clone <repo_url>
 cd ocr.advance
 
 # Create virtual environment
@@ -178,43 +194,57 @@ source .venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Configure environment variables
+# Setup environment variables
 cp .env.example .env
 ```
 
-Edit `.env` and configure your `DEEPSEEK_API_KEY`:
+### 3. Environment Configuration (`.env`)
 ```env
+APP_NAME=AI OCR Advance API
+VERSION=2.0.0
+ENVIRONMENT=development
+HOST=0.0.0.0
+PORT=8000
+WORKERS=1
+RELOAD=true
+
+# DeepSeek Configuration
 DEEPSEEK_API_KEY=your_actual_deepseek_api_key
+DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 DEEPSEEK_MODEL=deepseek-chat
-MAX_UPLOAD_SIZE_MB=25
-MAX_PDF_PAGES=50
+
+# Processing Limits
+MAX_UPLOAD_SIZE_MB=100
+MAX_PDF_PAGES=200
+MAX_BATCH_FILES=50
+
+# Timeouts
+OCR_TIMEOUT=120
+AI_TIMEOUT=60
+WEBHOOK_TIMEOUT=15
 ```
 
-### 2. Run Development Server
+### 4. Running the Server
 
 ```bash
+# Development mode with Hot Reload
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
 
-### 3. Run Production Server with Gunicorn
-
-```bash
+# Production mode with Gunicorn
 gunicorn -c gunicorn_conf.py app.main:app
 ```
 
-### 4. Run with Docker
-
-```bash
-docker build -t ocr-advance-api .
-docker run -p 8000:8000 --env-file .env ocr-advance-api
-```
-
----
-
-## 🧪 Testing
-
-Run the full automated test suite:
+### 5. Running Tests
 
 ```bash
 pytest -v
 ```
+
+---
+
+## 🔒 Security & Privacy
+
+- **Untrusted Input Defense**: DeepSeek system prompts explicitly treat all document content as untrusted input to defend against prompt-injection and override instructions.
+- **Arithmetic Integrity**: Balances and subtotals are audited mathematically with explicit warnings attached for discrepancies—raw figures are never silently modified.
+- **No Data Leakage**: Sensitive credentials, bank details, and raw documents are never logged or stored permanently.
+- **Webhook HMAC Signatures**: Webhook payloads are hashed with SHA256 using your shared `callback_secret` and transmitted via `X-Webhook-Signature`.

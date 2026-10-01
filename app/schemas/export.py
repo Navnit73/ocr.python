@@ -12,6 +12,9 @@ class ExportFormatEnum(str, Enum):
     EXCEL = "excel"
     CSV = "csv"
     PDF = "pdf"
+    OFX = "ofx"
+    QBO = "qbo"
+    QIF = "qif"
 
 
 class DirectExportRequest(BaseModel):
