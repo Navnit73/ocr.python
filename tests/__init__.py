@@ -1,3 +1,3 @@
 """
-Test Suite Package.
+Tests package.
 """
