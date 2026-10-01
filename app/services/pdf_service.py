@@ -2,7 +2,7 @@
 PDF Processing Service using PyMuPDF (pymupdf).
 """
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from fastapi import HTTPException, status
 import pymupdf
 import numpy as np
@@ -32,12 +32,14 @@ class PDFService:
     def process_pdf(
         cls,
         pdf_bytes: bytes,
+        password: Optional[str] = None,
         dpi: int = 300,
         min_digital_chars_per_page: int = 30,
     ) -> Tuple[List[PDFPageResult], int]:
         """
         Parses PDF document. Extracts embedded digital text directly, or renders
         scanned pages to high-resolution image bytes for downstream OCR.
+        Handles password-protected / encrypted PDFs safely.
         """
         settings = get_settings()
 
@@ -46,8 +48,24 @@ class PDFService:
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Failed to parse PDF document (corrupted or encrypted): {str(e)}"
+                detail=f"Failed to parse PDF document (corrupted or invalid format): {str(e)}"
             )
+
+        # Handle password-protected / encrypted PDFs
+        if doc.is_encrypted or doc.needs_pass:
+            if not password:
+                doc.close()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="PDF is password-protected. Please provide the 'password' parameter."
+                )
+            auth_success = doc.authenticate(password)
+            if not auth_success:
+                doc.close()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="PDF authentication failed: Incorrect password provided."
+                )
 
         total_pages = len(doc)
         if total_pages == 0:

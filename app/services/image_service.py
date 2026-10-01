@@ -15,7 +15,7 @@ class ImageService:
     @staticmethod
     def load_image_from_bytes(image_bytes: bytes) -> np.ndarray:
         """
-        Loads image bytes into a numpy array (BGR / Grayscale).
+        Loads image bytes into a numpy array (BGR).
         """
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -34,9 +34,11 @@ class ImageService:
         enhance_contrast: bool = True,
         denoise: bool = False,
         auto_deskew: bool = True,
+        as_3channel: bool = True,
     ) -> np.ndarray:
         """
         Preprocesses image for OCR while carefully preserving faint characters.
+        Returns a 3-channel BGR image by default for stable PaddleOCR processing.
         """
         # Convert to Grayscale if 3-channel
         if len(image.shape) == 3:
@@ -56,6 +58,9 @@ class ImageService:
         # Denoising only if noisy
         if denoise:
             gray = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+
+        if as_3channel:
+            return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
         return gray
 

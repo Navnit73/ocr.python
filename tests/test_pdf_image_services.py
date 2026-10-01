@@ -75,9 +75,53 @@ def test_image_service_preprocessing():
     assert isinstance(img_array, np.ndarray)
     assert len(img_array.shape) == 3
 
-    preprocessed = ImageService.preprocess_image(img_array, enhance_contrast=True, auto_deskew=True)
-    assert isinstance(preprocessed, np.ndarray)
-    assert len(preprocessed.shape) == 2  # Converted to Grayscale
+    # Default 3-channel preprocessed for PaddleOCR stability
+    preprocessed_3c = ImageService.preprocess_image(img_array, enhance_contrast=True, auto_deskew=True, as_3channel=True)
+    assert isinstance(preprocessed_3c, np.ndarray)
+    assert len(preprocessed_3c.shape) == 3
 
-    encoded_bytes = ImageService.image_to_bytes(preprocessed, ".png")
+    # Direct grayscale output
+    preprocessed_gray = ImageService.preprocess_image(img_array, enhance_contrast=True, auto_deskew=True, as_3channel=False)
+    assert isinstance(preprocessed_gray, np.ndarray)
+    assert len(preprocessed_gray.shape) == 2
+
+    encoded_bytes = ImageService.image_to_bytes(preprocessed_3c, ".png")
     assert len(encoded_bytes) > 0
+
+
+def create_sample_encrypted_pdf(text: str = "Confidential Payroll Data", password: str = "secret123") -> bytes:
+    """Helper to generate an encrypted PDF."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((50, 50), text)
+    pdf_bytes = doc.tobytes(
+        encryption=pymupdf.PDF_ENCRYPT_AES_256,
+        user_pw=password,
+        owner_pw="ownerpass"
+    )
+    doc.close()
+    return pdf_bytes
+
+
+def test_password_protected_pdf_success():
+    pdf_bytes = create_sample_encrypted_pdf(text="Protected Account Statement", password="mypassword")
+    pages, total = PDFService.process_pdf(pdf_bytes, password="mypassword")
+    assert total == 1
+    assert "Protected Account Statement" in pages[0].text
+
+
+def test_password_protected_pdf_missing_password():
+    pdf_bytes = create_sample_encrypted_pdf(text="Protected Account Statement", password="mypassword")
+    with pytest.raises(HTTPException) as exc_info:
+        PDFService.process_pdf(pdf_bytes, password=None)
+    assert exc_info.value.status_code == 400
+    assert "PDF is password-protected" in exc_info.value.detail
+
+
+def test_password_protected_pdf_wrong_password():
+    pdf_bytes = create_sample_encrypted_pdf(text="Protected Account Statement", password="mypassword")
+    with pytest.raises(HTTPException) as exc_info:
+        PDFService.process_pdf(pdf_bytes, password="wrongpassword")
+    assert exc_info.value.status_code == 400
+    assert "Incorrect password" in exc_info.value.detail
+

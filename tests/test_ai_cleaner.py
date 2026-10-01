@@ -63,3 +63,26 @@ async def test_ai_cleaner_timeout_fallback():
         assert cleaned == "Raw text content"
         assert len(warnings) == 1
         assert warnings[0].code == "AI_CLEANING_SKIPPED"
+
+
+def test_safe_json_loads_with_markdown():
+    from app.services.deepseek_client import safe_json_loads
+
+    # Direct JSON
+    assert safe_json_loads('{"key": "value"}') == {"key": "value"}
+
+    # Markdown fenced JSON with ```json
+    markdown_json = "```json\n{\n  \"cleaned_text\": \"Hello World\",\n  \"warnings\": []\n}\n```"
+    parsed = safe_json_loads(markdown_json)
+    assert parsed is not None
+    assert parsed["cleaned_text"] == "Hello World"
+
+    # Fenced JSON with leading and trailing text
+    preamble_json = "Here is your JSON output:\n```\n{\"total\": 150.0}\n```\nHope that helps!"
+    parsed_preamble = safe_json_loads(preamble_json)
+    assert parsed_preamble is not None
+    assert parsed_preamble["total"] == 150.0
+
+    # Invalid string
+    assert safe_json_loads("not a json object") is None
+

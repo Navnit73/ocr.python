@@ -1,5 +1,5 @@
 """
-OCR Service implementing PaddleOCR with non-blocking async execution.
+OCR Service implementing PaddleOCR with non-blocking async execution and reading-order sorting.
 """
 
 import asyncio
@@ -54,7 +54,7 @@ class OCRService:
         is_scanned: bool = True,
     ) -> PageExtraction:
         """
-        Extracts OCR text from image bytes asynchronously using a thread pool.
+        Extracts OCR text from image bytes asynchronously using a worker thread.
         """
         return await asyncio.to_thread(
             cls._extract_sync,
@@ -76,10 +76,9 @@ class OCRService:
         Synchronous OCR worker running in a worker thread.
         """
         img = ImageService.load_image_from_bytes(image_bytes)
-        preprocessed = ImageService.preprocess_image(img)
+        preprocessed = ImageService.preprocess_image(img, as_3channel=True)
 
         ocr_lines: List[OCRLine] = []
-        full_text_lines: List[str] = []
         confidences: List[float] = []
 
         engine = cls._get_engine(lang)
@@ -108,7 +107,6 @@ class OCRService:
                                         bbox=bbox if isinstance(bbox, list) else None,
                                     )
                                 )
-                                full_text_lines.append(text)
                                 confidences.append(conf)
             except Exception as e:
                 logger.error(f"PaddleOCR execution error on page {page_number}: {e}")
@@ -121,8 +119,11 @@ class OCRService:
                     clean_line = line.strip()
                     if clean_line:
                         ocr_lines.append(OCRLine(text=clean_line, confidence=0.85))
-                        full_text_lines.append(clean_line)
                         confidences.append(0.85)
+
+        # Sort OCR lines according to natural geometric reading order
+        sorted_lines = cls._sort_lines_reading_order(ocr_lines)
+        full_text_lines = [l.text for l in sorted_lines]
 
         avg_confidence = float(np.mean(confidences)) if confidences else (1.0 if not is_scanned else 0.0)
         combined_text = "\n".join(full_text_lines)
@@ -131,9 +132,62 @@ class OCRService:
             page_number=page_number,
             text=combined_text,
             confidence=round(avg_confidence, 4),
-            lines=ocr_lines,
+            lines=sorted_lines,
             is_scanned=is_scanned,
         )
+
+    @staticmethod
+    def _sort_lines_reading_order(lines: List[OCRLine]) -> List[OCRLine]:
+        """
+        Sorts OCR lines in natural reading order (top-to-bottom, left-to-right).
+        """
+        if not lines or len(lines) <= 1:
+            return lines
+
+        # If bounding boxes are missing, preserve order
+        if any(not l.bbox or len(l.bbox) < 4 for l in lines):
+            return lines
+
+        def get_bbox_stats(line: OCRLine):
+            pts = np.array(line.bbox)
+            ymin = np.min(pts[:, 1])
+            ymax = np.max(pts[:, 1])
+            xmin = np.min(pts[:, 0])
+            height = max(ymax - ymin, 1.0)
+            ycenter = (ymin + ymax) / 2.0
+            return ycenter, xmin, height
+
+        stats = [get_bbox_stats(l) for l in lines]
+        median_height = float(np.median([s[2] for s in stats])) if stats else 20.0
+        row_threshold = max(median_height * 0.6, 10.0)
+
+        # Sort by vertical center first
+        indexed_lines = sorted(
+            enumerate(lines),
+            key=lambda item: stats[item[0]][0]
+        )
+
+        # Group lines into rows based on row_threshold
+        rows: List[List[Tuple[int, OCRLine]]] = []
+        for idx, line in indexed_lines:
+            y_center = stats[idx][0]
+            placed = False
+            for row in rows:
+                row_y_center = np.mean([stats[i][0] for i, _ in row])
+                if abs(y_center - row_y_center) < row_threshold:
+                    row.append((idx, line))
+                    placed = True
+                    break
+            if not placed:
+                rows.append([(idx, line)])
+
+        # Sort each row horizontally (xmin)
+        result: List[OCRLine] = []
+        for row in rows:
+            sorted_row = sorted(row, key=lambda item: stats[item[0]][1])
+            result.extend([line for _, line in sorted_row])
+
+        return result
 
     @staticmethod
     def _fallback_ocr(image_bytes: bytes) -> str:
@@ -144,12 +198,10 @@ class OCRService:
             import pymupdf
             doc = pymupdf.open()
             img_doc = pymupdf.open("png", image_bytes)
-            rect = img_doc[0].rect
             pdfbytes = img_doc.convert_to_pdf()
             img_doc.close()
             doc = pymupdf.open("pdf", pdfbytes)
             page = doc[0]
-            # Try PyMuPDF OCR textpage if tesseract backend is present
             try:
                 tp = page.get_textpage_ocr(flags=0, dpi=300)
                 text = tp.extractText()

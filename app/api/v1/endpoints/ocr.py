@@ -49,6 +49,10 @@ async def extract_document(
         default=None,
         description="Optional unique request ID from frontend. Returned in response.",
     ),
+    password: Optional[str] = Form(
+        default=None,
+        description="Optional password for password-protected PDF documents",
+    ),
     x_request_id: Optional[str] = Header(
         default=None,
         alias="X-Request-ID",
@@ -67,4 +71,5 @@ async def extract_document(
         language=language.value,
         clean_with_ai=clean_with_ai,
         client_request_id=effective_request_id,
+        password=password,
     )

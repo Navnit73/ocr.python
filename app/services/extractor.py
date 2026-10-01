@@ -12,7 +12,7 @@ from app.schemas.receipt import ReceiptExtraction
 from app.schemas.invoice import InvoiceExtraction
 from app.schemas.general import GeneralExtraction
 from app.schemas.ocr import DocumentTypeEnum, ExtractionWarning
-from app.services.deepseek_client import DeepSeekClient
+from app.services.deepseek_client import DeepSeekClient, safe_json_loads
 
 logger = logging.getLogger("extractor")
 
@@ -186,14 +186,13 @@ class StructuredExtractor:
             )
             return self._heuristic_fallback(text, document_type)
 
-        try:
-            raw_json = json.loads(response)
-        except Exception as e:
-            logger.error(f"DeepSeek returned invalid JSON: {e}")
+        raw_json = safe_json_loads(response)
+        if raw_json is None:
+            logger.error("DeepSeek returned non-parseable JSON payload.")
             warnings.append(
-                ExtractionWarning(code="INVALID_AI_JSON", message="AI returned malformed JSON payload.")
+                ExtractionWarning(code="INVALID_AI_JSON", message="AI returned malformed or non-JSON payload.")
             )
-            return None, warnings
+            return self._heuristic_fallback(text, document_type)
 
         # Validate with document-specific Pydantic model and run arithmetic checks
         validated_data, validation_warnings = self._validate_and_audit(raw_json, document_type)

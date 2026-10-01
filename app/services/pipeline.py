@@ -2,6 +2,7 @@
 End-to-End Stateless OCR & Extraction Pipeline Orchestrator.
 """
 
+import asyncio
 import logging
 import time
 from typing import List, Optional
@@ -47,6 +48,7 @@ class ExtractionPipeline:
         language: str = "en",
         clean_with_ai: bool = True,
         client_request_id: Optional[str] = None,
+        password: Optional[str] = None,
     ) -> ExtractionResponse:
         """
         Executes the full extraction pipeline for an uploaded file.
@@ -63,34 +65,36 @@ class ExtractionPipeline:
 
         pages: List[PageExtraction] = []
         ocr_used = False
-        ocr_engine_name = "pymupdf"
+        ocr_engine_name = "pymupdf_digital"
 
-        # 2. Text Extraction & OCR
+        # 2. Text Extraction & OCR (with concurrent page processing for multi-page documents)
         t0 = time.perf_counter()
         if doc_category == "pdf":
-            page_results, total_pages = PDFService.process_pdf(file_bytes)
-            for presult in page_results:
+            page_results, total_pages = PDFService.process_pdf(file_bytes, password=password)
+            ocr_semaphore = asyncio.Semaphore(4)  # Limit concurrent OCR threads to 4
+
+            async def _process_page(presult) -> PageExtraction:
                 if not presult.is_scanned:
-                    # Digital PDF page with direct embedded text
-                    pages.append(
-                        PageExtraction(
-                            page_number=presult.page_number,
-                            text=presult.text,
-                            confidence=1.0,
-                            is_scanned=False,
-                        )
+                    return PageExtraction(
+                        page_number=presult.page_number,
+                        text=presult.text,
+                        confidence=1.0,
+                        is_scanned=False,
                     )
                 else:
-                    # Scanned PDF page -> Run OCR
-                    ocr_used = True
-                    ocr_engine_name = "paddleocr"
-                    page_extraction = await OCRService.extract_from_image_bytes(
-                        image_bytes=presult.image_bytes,
-                        page_number=presult.page_number,
-                        lang=language,
-                        is_scanned=True,
-                    )
-                    pages.append(page_extraction)
+                    async with ocr_semaphore:
+                        return await OCRService.extract_from_image_bytes(
+                            image_bytes=presult.image_bytes,
+                            page_number=presult.page_number,
+                            lang=language,
+                            is_scanned=True,
+                        )
+
+            # Process all pages concurrently preserving index order
+            pages = list(await asyncio.gather(*[_process_page(p) for p in page_results]))
+            ocr_used = any(p.is_scanned for p in pages)
+            if ocr_used:
+                ocr_engine_name = "paddleocr"
         else:
             # Direct Image upload
             ocr_used = True
@@ -101,7 +105,7 @@ class ExtractionPipeline:
                 lang=language,
                 is_scanned=True,
             )
-            pages.append(page_extraction)
+            pages = [page_extraction]
 
         stage_timings["ocr_extraction"] = int((time.perf_counter() - t0) * 1000)
 

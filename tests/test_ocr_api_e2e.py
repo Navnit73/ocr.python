@@ -95,6 +95,37 @@ async def test_corrupted_upload_error():
 
 
 @pytest.mark.asyncio
+async def test_extract_password_protected_pdf_e2e():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Create encrypted PDF
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((50, 50), "Confidential Bank Statement for VIP Client")
+        enc_bytes = doc.tobytes(
+            encryption=pymupdf.PDF_ENCRYPT_AES_256,
+            user_pw="bankpass123",
+            owner_pw="ownerpass"
+        )
+        doc.close()
+
+        files = {
+            "file": ("encrypted_statement.pdf", enc_bytes, "application/pdf")
+        }
+        data = {
+            "password": "bankpass123",
+            "clean_with_ai": "false",
+            "request_id": "req_enc_pdf_1",
+        }
+
+        response = await client.post("/api/v1/ocr/extract", files=files, data=data)
+        assert response.status_code == 200
+        res_json = response.json()
+        assert res_json["id"] == "req_enc_pdf_1"
+        assert "Confidential Bank Statement" in res_json["raw_text"]
+
+
+@pytest.mark.asyncio
 async def test_health_check_endpoint():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:

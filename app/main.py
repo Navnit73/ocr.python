@@ -28,6 +28,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(f"🚀 Starting {settings.app_name} v{settings.version} in [{settings.environment}] mode...")
     yield
     logger.info(f"🛑 Shutting down {settings.app_name}...")
+    from app.services.deepseek_client import DeepSeekClient
+    await DeepSeekClient.close_client()
 
 
 def create_application() -> FastAPI:

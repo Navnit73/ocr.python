@@ -8,7 +8,7 @@ import re
 from typing import List, Optional, Tuple
 
 from app.schemas.ocr import ExtractionWarning
-from app.services.deepseek_client import DeepSeekClient
+from app.services.deepseek_client import DeepSeekClient, safe_json_loads
 
 logger = logging.getLogger("ai_cleaner")
 
@@ -93,21 +93,21 @@ class AICleaner:
         if not response:
             return normalized, [ExtractionWarning(code="AI_CLEANING_SKIPPED", message="AI cleaning unavailable or timed out; raw OCR text preserved.")], False
 
-        try:
-            data = json.loads(response)
-            cleaned = data.get("cleaned_text", normalized)
-            raw_warnings = data.get("warnings", [])
-            review_required = bool(data.get("review_required", False))
-
-            warnings: List[ExtractionWarning] = [
-                ExtractionWarning(code="AI_CORRECTION_NOTE", message=str(w))
-                for w in raw_warnings
-            ]
-
-            return cleaned, warnings, review_required
-        except Exception as e:
-            logger.warning(f"Failed to parse DeepSeek cleaning JSON response: {e}")
+        data = safe_json_loads(response)
+        if not data:
+            logger.warning("Failed to parse DeepSeek cleaning JSON response.")
             return normalized, [ExtractionWarning(code="AI_PARSE_WARNING", message="Failed to parse AI cleaning payload; using raw OCR text.")], False
+
+        cleaned = data.get("cleaned_text", normalized)
+        raw_warnings = data.get("warnings", [])
+        review_required = bool(data.get("review_required", False))
+
+        warnings: List[ExtractionWarning] = [
+            ExtractionWarning(code="AI_CORRECTION_NOTE", message=str(w))
+            for w in raw_warnings
+        ]
+
+        return cleaned, warnings, review_required
 
     async def _clean_in_chunks(self, text: str) -> Tuple[str, List[ExtractionWarning], bool]:
         """

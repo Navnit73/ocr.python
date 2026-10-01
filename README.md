@@ -70,6 +70,7 @@ Extracts text and structured financial data from an uploaded file.
 | `language` | String | No | OCR language hint (`auto`, `en`, `hi`, `es`, `fr`, `de`, `ch`) | `en` |
 | `clean_with_ai` | Boolean | No | Whether to perform DeepSeek cleaning and structured extraction | `true` |
 | `request_id` | String | No | Custom ID provided by frontend to correlate documents | Auto UUID |
+| `password` | String | No | Password for password-protected / encrypted PDF files | `null` |
 
 #### Example Response (`200 OK` — Bank Statement):
 ```json

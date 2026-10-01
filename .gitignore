@@ -25,7 +25,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
+.env.example
 # PyInstaller
 *.manifest
 *.spec
