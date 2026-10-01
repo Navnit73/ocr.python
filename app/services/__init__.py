@@ -10,6 +10,9 @@ from app.services.deepseek_client import DeepSeekClient
 from app.services.ai_cleaner import AICleaner
 from app.services.classifier import DocumentClassifier
 from app.services.extractor import StructuredExtractor
+from app.services.analytics_service import AnalyticsService
+from app.services.export_service import ExportService
+from app.services.result_cache import ResultCache
 from app.services.pipeline import ExtractionPipeline
 
 __all__ = [
@@ -22,5 +25,8 @@ __all__ = [
     "AICleaner",
     "DocumentClassifier",
     "StructuredExtractor",
+    "AnalyticsService",
+    "ExportService",
+    "ResultCache",
     "ExtractionPipeline",
 ]

@@ -41,6 +41,23 @@ def sample_bank_extraction():
     }
 
 
+def test_analytics_categorization_and_subscriptions(sample_bank_extraction):
+    from app.services.analytics_service import AnalyticsService
+    analytics = AnalyticsService.analyze("bank_statement", sample_bank_extraction)
+
+    assert analytics.total_inflow == 25000.00
+    assert analytics.total_outflow == 500.00
+    assert analytics.net_savings == 24500.00
+    assert analytics.transaction_count == 2
+    assert len(analytics.ai_insights) > 0
+
+    # Test category matching
+    assert AnalyticsService.categorize_description("NETFLIX.COM PAYMENT") == "Entertainment & Subscriptions"
+    assert AnalyticsService.categorize_description("STARBUCKS COFFEE") == "Food & Dining"
+    assert AnalyticsService.categorize_description("MONTHLY SALARY TRANSFER") == "Salary & Income"
+    assert AnalyticsService.categorize_description("UBER TRIP") == "Travel & Commute"
+
+
 def test_generate_excel(sample_bank_extraction):
     file_bytes = ExportService.generate_excel(
         doc_id="test_doc_01",
