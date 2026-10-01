@@ -2,6 +2,8 @@
 Tests for Document Export Service and Export API Endpoints (Excel, CSV, PDF).
 """
 
+import io
+import openpyxl
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -41,6 +43,25 @@ def sample_bank_extraction():
     }
 
 
+@pytest.fixture
+def sample_invoice_extraction():
+    return {
+        "invoice_number": "INV-2026-8800",
+        "invoice_date": "2026-09-10",
+        "due_date": "2026-10-10",
+        "currency": "USD",
+        "supplier": {"name": "Cloud Infra Inc.", "address": "123 Tech Blvd", "tax_id": "US-889900"},
+        "customer": {"name": "Alpha Corp", "address": "456 Market St", "tax_id": "US-112233"},
+        "subtotal": 5000.00,
+        "tax": 450.00,
+        "total": 5450.00,
+        "line_items": [
+            {"description": "Server Hosting", "quantity": 2, "unit_price": 2000.00, "tax_rate": "9%", "amount": 4000.00},
+            {"description": "Database Backup", "quantity": 1, "unit_price": 1000.00, "tax_rate": "9%", "amount": 1000.00},
+        ],
+    }
+
+
 def test_analytics_categorization_and_subscriptions(sample_bank_extraction):
     from app.services.analytics_service import AnalyticsService
     analytics = AnalyticsService.analyze("bank_statement", sample_bank_extraction)
@@ -58,7 +79,7 @@ def test_analytics_categorization_and_subscriptions(sample_bank_extraction):
     assert AnalyticsService.categorize_description("UBER TRIP") == "Travel & Commute"
 
 
-def test_generate_excel(sample_bank_extraction):
+def test_generate_excel_bank_statement(sample_bank_extraction):
     file_bytes = ExportService.generate_excel(
         doc_id="test_doc_01",
         document_type="bank_statement",
@@ -66,8 +87,43 @@ def test_generate_excel(sample_bank_extraction):
     )
     assert isinstance(file_bytes, bytes)
     assert len(file_bytes) > 0
-    # Check Excel zip signature
     assert file_bytes[:2] == b"PK"
+
+    # Verify workbook structure and no diagonal column drift
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
+    assert "Executive Dashboard" in wb.sheetnames
+    assert "Itemized Ledger" in wb.sheetnames
+
+    ws_ledger = wb["Itemized Ledger"]
+    # Row 4 is header, Row 5 is Tx 1, Row 6 is Tx 2, Row 7 is Summary
+    assert ws_ledger.cell(row=5, column=1).value == "2026-09-01"
+    assert ws_ledger.cell(row=5, column=3).value == "UPI PAYMENT"
+    assert ws_ledger.cell(row=5, column=5).value == 500.00
+
+    assert ws_ledger.cell(row=6, column=1).value == "2026-09-02"
+    assert ws_ledger.cell(row=6, column=3).value == "SALARY CREDIT"
+    assert ws_ledger.cell(row=6, column=6).value == 25000.00
+
+
+def test_generate_excel_invoice(sample_invoice_extraction):
+    file_bytes = ExportService.generate_excel(
+        doc_id="test_inv_01",
+        document_type="invoice",
+        extraction=sample_invoice_extraction,
+    )
+    assert isinstance(file_bytes, bytes)
+    assert file_bytes[:2] == b"PK"
+
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
+    ws_ledger = wb["Itemized Ledger"]
+    # Verify line items on separate rows
+    assert ws_ledger.cell(row=5, column=1).value == "Server Hosting"
+    assert ws_ledger.cell(row=5, column=3).value == 2
+    assert ws_ledger.cell(row=5, column=6).value == 4000.00
+
+    assert ws_ledger.cell(row=6, column=1).value == "Database Backup"
+    assert ws_ledger.cell(row=6, column=3).value == 1
+    assert ws_ledger.cell(row=6, column=6).value == 1000.00
 
 
 def test_generate_csv(sample_bank_extraction):
@@ -91,7 +147,16 @@ def test_generate_pdf(sample_bank_extraction):
     )
     assert isinstance(pdf_bytes, bytes)
     assert len(pdf_bytes) > 0
-    # Check PDF signature
+    assert pdf_bytes.startswith(b"%PDF-")
+
+
+def test_generate_pdf_invoice(sample_invoice_extraction):
+    pdf_bytes = ExportService.generate_pdf(
+        doc_id="test_inv_01",
+        document_type="invoice",
+        extraction=sample_invoice_extraction,
+    )
+    assert isinstance(pdf_bytes, bytes)
     assert pdf_bytes.startswith(b"%PDF-")
 
 

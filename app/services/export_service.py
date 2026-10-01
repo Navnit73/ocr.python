@@ -16,8 +16,6 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.pdfgen import canvas
 from reportlab.platypus import (
-    HRFlowable,
-    KeepTogether,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -33,9 +31,7 @@ from app.services.analytics_service import AnalyticsService, FinancialAnalytics
 def create_progress_bar(percentage: float, width: float = 70, height: float = 7, color_hex: str = "#4F46E5") -> Drawing:
     """Creates a sleek horizontal micro progress bar for category visual share."""
     d = Drawing(width, height)
-    # Background track
     d.add(Rect(0, 0, width, height, fillColor=colors.HexColor("#E2E8F0"), strokeColor=None, rx=3.5, ry=3.5))
-    # Filled bar
     fill_w = max(0.0, min(width, (percentage / 100.0) * width))
     if fill_w > 0:
         d.add(Rect(0, 0, fill_w, height, fillColor=colors.HexColor(color_hex), strokeColor=None, rx=3.5, ry=3.5))
@@ -145,181 +141,206 @@ class ExportService:
 
         wb = openpyxl.Workbook()
 
-        # Sheet 1: Executive Dashboard
-        ws_dash = wb.active
-        ws_dash.title = "Financial Dashboard"
-        ws_dash.views.sheetView[0].showGridLines = True
-
-        # Sheet 2: Detailed Ledger
-        ws_ledger = wb.create_sheet(title="Transaction Ledger")
-        ws_ledger.views.sheetView[0].showGridLines = True
-
-        # Color Palette
+        # Styles definition
         navy_dark = PatternFill(start_color="0F172A", end_color="0F172A", fill_type="solid")
         navy_header = PatternFill(start_color="1E3A8A", end_color="1E3A8A", fill_type="solid")
-        card_fill = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
-        alt_row_fill = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
-        sub_card_fill = PatternFill(start_color="FAF5FF", end_color="FAF5FF", fill_type="solid")
+        card_fill_green = PatternFill(start_color="ECFDF5", end_color="ECFDF5", fill_type="solid")
+        card_fill_red = PatternFill(start_color="FFF1F2", end_color="FFF1F2", fill_type="solid")
+        card_fill_blue = PatternFill(start_color="F0F9FF", end_color="F0F9FF", fill_type="solid")
+        card_fill_purple = PatternFill(start_color="FAF5FF", end_color="FAF5FF", fill_type="solid")
+        card_fill_neutral = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
+        alt_row_fill = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
         insight_fill = PatternFill(start_color="F0FDF4", end_color="F0FDF4", fill_type="solid")
+        total_fill = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
 
-        # Fonts
-        title_font = Font(name="Segoe UI", size=15, bold=True, color="FFFFFF")
-        section_font = Font(name="Segoe UI", size=12, bold=True, color="0F172A")
-        kpi_title_font = Font(name="Segoe UI", size=9, bold=True, color="64748B")
-        kpi_val_green = Font(name="Segoe UI", size=14, bold=True, color="16A34A")
-        kpi_val_red = Font(name="Segoe UI", size=14, bold=True, color="DC2626")
-        kpi_val_blue = Font(name="Segoe UI", size=14, bold=True, color="2563EB")
-        kpi_val_purple = Font(name="Segoe UI", size=14, bold=True, color="7C3AED")
-        header_font = Font(name="Segoe UI", size=10, bold=True, color="FFFFFF")
-        regular_font = Font(name="Segoe UI", size=10, color="1E293B")
-        bold_font = Font(name="Segoe UI", size=10, bold=True, color="0F172A")
+        title_font = Font(name="Segoe UI", size=14, bold=True, color="FFFFFF")
+        section_font = Font(name="Segoe UI", size=11, bold=True, color="0F172A")
+        kpi_title_font = Font(name="Segoe UI", size=8.5, bold=True, color="64748B")
+        kpi_val_green = Font(name="Segoe UI", size=13, bold=True, color="059669")
+        kpi_val_red = Font(name="Segoe UI", size=13, bold=True, color="DC2626")
+        kpi_val_blue = Font(name="Segoe UI", size=13, bold=True, color="0284C7")
+        kpi_val_purple = Font(name="Segoe UI", size=13, bold=True, color="7C3AED")
+        header_font = Font(name="Segoe UI", size=9.5, bold=True, color="FFFFFF")
+        regular_font = Font(name="Segoe UI", size=9.5, color="1E293B")
+        bold_font = Font(name="Segoe UI", size=9.5, bold=True, color="0F172A")
+        credit_font = Font(name="Segoe UI", size=9.5, bold=True, color="059669")
+        debit_font = Font(name="Segoe UI", size=9.5, color="DC2626")
 
         thin_side = Side(border_style="thin", color="CBD5E1")
         border_all = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+        double_bottom = Side(border_style="double", color="0F172A")
+        thin_top = Side(border_style="thin", color="0F172A")
+        total_border = Border(left=thin_side, right=thin_side, top=thin_top, bottom=double_bottom)
 
         # ---------------------------------------------------------------------
-        # BUILD SHEET 1: DASHBOARD
+        # SHEET 1: EXECUTIVE DASHBOARD
         # ---------------------------------------------------------------------
+        ws_dash = wb.active
+        ws_dash.title = "Executive Dashboard"
+        ws_dash.views.sheetView[0].showGridLines = True
+
         # Header Banner
         ws_dash.merge_cells("A1:G2")
         title_cell = ws_dash["A1"]
-        title_cell.value = f"📊 {document_type.replace('_', ' ').upper()} - FINANCIAL DASHBOARD & AI INSIGHTS"
+        title_cell.value = f"📊 {document_type.replace('_', ' ').upper()} - FINANCIAL AUDIT & DASHBOARD"
         title_cell.font = title_font
         title_cell.alignment = Alignment(horizontal="center", vertical="center")
-        for r in ws_dash["A1:G2"]:
-            for c in r:
-                c.fill = navy_dark
+        for r in range(1, 3):
+            for c in range(1, 8):
+                ws_dash.cell(row=r, column=c).fill = navy_dark
 
-        # Document Meta info (Row 4-5)
+        # Metadata Row (Rows 4-5)
         meta_items = cls._get_metadata_summary(document_type, extraction, doc_id)
         if meta_items:
             for col_idx, (label, val) in enumerate(meta_items[:4], start=1):
-                cell_label = ws_dash.cell(row=4, column=col_idx, value=label)
-                cell_label.font = kpi_title_font
-                cell_val = ws_dash.cell(row=5, column=col_idx, value=val)
-                cell_val.font = bold_font
+                cell_lbl = ws_dash.cell(row=4, column=col_idx, value=label.upper())
+                cell_lbl.font = kpi_title_font
+                cell_lbl.alignment = Alignment(horizontal="left", vertical="center")
+                cell_v = ws_dash.cell(row=5, column=col_idx, value=val)
+                cell_v.font = bold_font
+                cell_v.alignment = Alignment(horizontal="left", vertical="center")
 
-        # KPI Summary Cards (Rows 7-9)
-        cards = [
-            ("TOTAL INFLOW / CREDITS", analytics.total_inflow, kpi_val_green, "A", "B"),
-            ("TOTAL OUTFLOW / EXPENSES", analytics.total_outflow, kpi_val_red, "C", "D"),
-            ("NET SAVINGS / CASHFLOW", analytics.net_savings, kpi_val_blue, "E", "E"),
-            ("ACTIVE SUBSCRIPTIONS", f"{analytics.subscription_count} ({analytics.subscription_total:,.2f})", kpi_val_purple, "F", "G"),
-        ]
+        # 4 Document-Specific KPI Cards (Rows 7-9)
+        cards = cls._get_excel_kpi_cards(
+            document_type,
+            extraction,
+            analytics,
+            kpi_val_green,
+            kpi_val_red,
+            kpi_val_blue,
+            kpi_val_purple,
+            [card_fill_green, card_fill_red, card_fill_blue, card_fill_purple, card_fill_neutral],
+        )
 
-        for title, val, font, start_col, end_col in cards:
-            r1 = f"{start_col}7"
-            ws_dash.merge_cells(f"{start_col}7:{end_col}7")
-            ws_dash.merge_cells(f"{start_col}8:{end_col}9")
+        col_ranges = [("A", "B"), ("C", "D"), ("E", "E"), ("F", "G")]
+        for idx, (title, val, font, fill) in enumerate(cards):
+            sc, ec = col_ranges[idx]
+            ws_dash.merge_cells(f"{sc}7:{ec}7")
+            ws_dash.merge_cells(f"{sc}8:{ec}9")
 
-            c_title = ws_dash[r1]
+            c_title = ws_dash[f"{sc}7"]
             c_title.value = title
             c_title.font = kpi_title_font
             c_title.alignment = Alignment(horizontal="center", vertical="center")
 
-            c_val = ws_dash[f"{start_col}8"]
+            c_val = ws_dash[f"{sc}8"]
             c_val.value = val
             c_val.font = font
             c_val.alignment = Alignment(horizontal="center", vertical="center")
             if isinstance(val, (int, float)):
                 c_val.number_format = "#,##0.00"
 
-            for row in ws_dash[f"{start_col}7:{end_col}9"]:
-                for cell in row:
-                    cell.fill = card_fill
-                    cell.border = border_all
+            start_c = openpyxl.utils.column_index_from_string(sc)
+            end_c = openpyxl.utils.column_index_from_string(ec)
+            for r in range(7, 10):
+                for c in range(start_c, end_c + 1):
+                    ws_dash.cell(row=r, column=c).fill = fill
+                    ws_dash.cell(row=r, column=c).border = border_all
 
-        # Expense Category Breakdown Table (Row 11)
-        ws_dash.cell(row=11, column=1, value="📁 Expense Category Breakdown").font = section_font
+        # Expense Category Breakdown Table & Subscriptions Card (Rows 11+)
+        curr_r = 11
+        ws_dash.cell(row=curr_r, column=1, value="📁 Expense Category Breakdown").font = section_font
+        ws_dash.cell(row=curr_r, column=6, value="🔁 Recurring Subscriptions").font = section_font
+        curr_r += 1
+
         cat_headers = ["Category", "Amount", "% Share", "Transactions"]
         for c_idx, h in enumerate(cat_headers, start=1):
-            c = ws_dash.cell(row=12, column=c_idx, value=h)
+            c = ws_dash.cell(row=curr_r, column=c_idx, value=h)
             c.font = header_font
             c.fill = navy_header
             c.border = border_all
             c.alignment = Alignment(horizontal="center", vertical="center")
 
-        curr_r = 13
-        for cat in analytics.categories:
-            ws_dash.cell(row=curr_r, column=1, value=cat.category).font = regular_font
-            c2 = ws_dash.cell(row=curr_r, column=2, value=cat.amount)
-            c2.font = regular_font
-            c2.number_format = "#,##0.00"
-            c3 = ws_dash.cell(row=curr_r, column=3, value=f"{cat.percentage}%")
-            c3.font = regular_font
-            c3.alignment = Alignment(horizontal="center")
-            c4 = ws_dash.cell(row=curr_r, column=4, value=cat.count)
-            c4.font = regular_font
-            c4.alignment = Alignment(horizontal="center")
+        ws_dash.cell(row=curr_r, column=6, value="Service / Merchant").font = header_font
+        ws_dash.cell(row=curr_r, column=6).fill = navy_header
+        ws_dash.cell(row=curr_r, column=6).border = border_all
+        ws_dash.cell(row=curr_r, column=7, value="Amount").font = header_font
+        ws_dash.cell(row=curr_r, column=7).fill = navy_header
+        ws_dash.cell(row=curr_r, column=7).border = border_all
 
+        cat_start_r = curr_r + 1
+        r_cat = cat_start_r
+        if analytics.categories:
+            for cat in analytics.categories:
+                ws_dash.cell(row=r_cat, column=1, value=cat.category).font = regular_font
+                c2 = ws_dash.cell(row=r_cat, column=2, value=cat.amount)
+                c2.font = regular_font
+                c2.number_format = "#,##0.00"
+                c3 = ws_dash.cell(row=r_cat, column=3, value=f"{cat.percentage}%")
+                c3.font = regular_font
+                c3.alignment = Alignment(horizontal="center")
+                c4 = ws_dash.cell(row=r_cat, column=4, value=cat.count)
+                c4.font = regular_font
+                c4.alignment = Alignment(horizontal="center")
+
+                for col in range(1, 5):
+                    ws_dash.cell(row=r_cat, column=col).border = border_all
+                    if r_cat % 2 == 0:
+                        ws_dash.cell(row=r_cat, column=col).fill = alt_row_fill
+                r_cat += 1
+        else:
+            ws_dash.cell(row=r_cat, column=1, value="No categorical expenses").font = regular_font
             for col in range(1, 5):
-                ws_dash.cell(row=curr_r, column=col).border = border_all
-                if curr_r % 2 == 0:
-                    ws_dash.cell(row=curr_r, column=col).fill = alt_row_fill
-            curr_r += 1
+                ws_dash.cell(row=r_cat, column=col).border = border_all
+            r_cat += 1
 
-        # Subscriptions Card (Side Column F & G)
-        ws_dash.cell(row=11, column=6, value="🔁 Detected Subscriptions").font = section_font
-        ws_dash.cell(row=12, column=6, value="Service / Merchant").font = header_font
-        ws_dash.cell(row=12, column=6).fill = navy_header
-        ws_dash.cell(row=12, column=6).border = border_all
-        ws_dash.cell(row=12, column=7, value="Amount").font = header_font
-        ws_dash.cell(row=12, column=7).fill = navy_header
-        ws_dash.cell(row=12, column=7).border = border_all
-
-        sub_r = 13
+        r_sub = cat_start_r
         if analytics.subscriptions:
             for sub in analytics.subscriptions:
-                ws_dash.cell(row=sub_r, column=6, value=sub.merchant).font = regular_font
-                c_amt = ws_dash.cell(row=sub_r, column=7, value=sub.amount)
+                ws_dash.cell(row=r_sub, column=6, value=sub.merchant).font = regular_font
+                c_amt = ws_dash.cell(row=r_sub, column=7, value=sub.amount)
                 c_amt.font = bold_font
                 c_amt.number_format = "#,##0.00"
                 for col in [6, 7]:
-                    ws_dash.cell(row=sub_r, column=col).fill = sub_card_fill
-                    ws_dash.cell(row=sub_r, column=col).border = border_all
-                sub_r += 1
+                    ws_dash.cell(row=r_sub, column=col).fill = card_fill_purple
+                    ws_dash.cell(row=r_sub, column=col).border = border_all
+                r_sub += 1
         else:
-            ws_dash.cell(row=sub_r, column=6, value="No recurring subscriptions").font = regular_font
-            ws_dash.cell(row=sub_r, column=7, value="-").font = regular_font
-            sub_r += 1
+            ws_dash.cell(row=r_sub, column=6, value="No recurring subscriptions").font = regular_font
+            ws_dash.cell(row=r_sub, column=7, value="-").font = regular_font
+            for col in [6, 7]:
+                ws_dash.cell(row=r_sub, column=col).border = border_all
+            r_sub += 1
 
-        # AI Financial Insights Section
-        insights_start_row = max(curr_r, sub_r) + 2
-        ws_dash.cell(row=insights_start_row, column=1, value="💡 AI Financial Insights & Savings Recommendations").font = section_font
+        # AI Insights Section
+        insights_start_row = max(r_cat, r_sub) + 2
+        ws_dash.cell(row=insights_start_row, column=1, value="💡 AI Financial Insights & Audit Summary").font = section_font
         for i_idx, insight in enumerate(analytics.ai_insights, start=1):
             row_idx = insights_start_row + i_idx
             ws_dash.merge_cells(f"A{row_idx}:G{row_idx}")
             ins_cell = ws_dash[f"A{row_idx}"]
-            ins_cell.value = insight
+            ins_cell.value = f"• {insight}"
             ins_cell.font = bold_font
             ins_cell.alignment = Alignment(horizontal="left", vertical="center")
-            for c in ws_dash[f"A{row_idx}:G{row_idx}"][0]:
-                c.fill = insight_fill
-                c.border = border_all
+            for c in range(1, 8):
+                ws_dash.cell(row=row_idx, column=c).fill = insight_fill
+                ws_dash.cell(row=row_idx, column=c).border = border_all
 
-        # Auto-adjust column widths for Dashboard
-        for col in ws_dash.columns:
-            max_len = 0
-            col_letter = get_column_letter(col[0].column)
-            for cell in col:
-                val = str(cell.value or "")
-                max_len = max(max_len, len(val))
-            ws_dash.column_dimensions[col_letter].width = max(min(max_len + 3, 40), 16)
+        col_widths_dash = {"A": 26, "B": 16, "C": 14, "D": 14, "E": 20, "F": 24, "G": 16}
+        for col_letter, width in col_widths_dash.items():
+            ws_dash.column_dimensions[col_letter].width = width
 
         # ---------------------------------------------------------------------
-        # BUILD SHEET 2: TRANSACTION LEDGER
+        # SHEET 2: ITEMIZED LEDGER / LINE ITEMS
         # ---------------------------------------------------------------------
-        ws_ledger.merge_cells("A1:G2")
-        t_cell = ws_ledger["A1"]
-        t_cell.value = f"📑 {document_type.replace('_', ' ').upper()} - ITEMIZED LEDGER"
-        t_cell.font = title_font
-        t_cell.alignment = Alignment(horizontal="center", vertical="center")
-        for r in ws_ledger["A1:G2"]:
-            for c in r:
-                c.fill = navy_header
+        ws_ledger = wb.create_sheet(title="Itemized Ledger")
+        ws_ledger.views.sheetView[0].showGridLines = True
 
         headers, rows = cls._get_table_data_with_category(document_type, extraction)
+        max_col_idx = max(len(headers), 6) if headers else 7
+        last_letter = get_column_letter(max_col_idx)
+
+        ws_ledger.merge_cells(f"A1:{last_letter}2")
+        t_cell = ws_ledger["A1"]
+        t_cell.value = f"📑 {document_type.replace('_', ' ').upper()} - ITEMIZED TRANSACTION LEDGER"
+        t_cell.font = title_font
+        t_cell.alignment = Alignment(horizontal="center", vertical="center")
+        for r in range(1, 3):
+            for c in range(1, max_col_idx + 1):
+                ws_ledger.cell(row=r, column=c).fill = navy_header
+
         if headers:
+            # Header Row
             for c_idx, h in enumerate(headers, start=1):
                 c = ws_ledger.cell(row=4, column=c_idx, value=h)
                 c.font = header_font
@@ -327,32 +348,148 @@ class ExportService:
                 c.alignment = Alignment(horizontal="center", vertical="center")
                 c.border = border_all
 
+            # Data Rows
             ledger_row = 5
+            total_debits = 0.0
+            total_credits = 0.0
+            total_amount_sum = 0.0
+
             for r_idx, r in enumerate(rows):
                 fill = alt_row_fill if r_idx % 2 == 1 else PatternFill(fill_type=None)
                 for col_idx, val in enumerate(r, start=1):
                     c = ws_ledger.cell(row=ledger_row, column=col_idx, value=val)
-                    c.font = regular_font
                     c.border = border_all
                     c.fill = fill
+
+                    h_name = headers[col_idx - 1]
                     if isinstance(val, (int, float)):
                         c.number_format = "#,##0.00"
-                        c.alignment = Alignment(horizontal="right")
+                        c.alignment = Alignment(horizontal="right", vertical="center")
+                        if h_name == "Credit":
+                            c.font = credit_font
+                            total_credits += float(val)
+                        elif h_name == "Debit":
+                            c.font = debit_font
+                            total_debits += float(val)
+                        elif h_name in ["Amount", "Total"]:
+                            c.font = bold_font
+                            total_amount_sum += float(val)
+                        else:
+                            c.font = regular_font
+                    elif h_name in ["Date", "Category", "Quantity", "Tax Rate", "Reference"]:
+                        c.alignment = Alignment(horizontal="center", vertical="center")
+                        c.font = regular_font
                     else:
-                        c.alignment = Alignment(horizontal="left")
-                    ledger_row += 1
+                        c.alignment = Alignment(horizontal="left", vertical="center")
+                        c.font = regular_font
 
-        for col in ws_ledger.columns:
+                ledger_row += 1
+
+            # Summary Totals Row
+            if len(rows) > 0:
+                ws_ledger.cell(row=ledger_row, column=1, value="TOTAL SUMMARY").font = bold_font
+                ws_ledger.cell(row=ledger_row, column=1).alignment = Alignment(horizontal="left", vertical="center")
+
+                for c_idx, h in enumerate(headers, start=1):
+                    cell_tot = ws_ledger.cell(row=ledger_row, column=c_idx)
+                    cell_tot.border = total_border
+                    cell_tot.fill = total_fill
+
+                    if h == "Debit":
+                        cell_tot.value = total_debits
+                        cell_tot.font = debit_font
+                        cell_tot.number_format = "#,##0.00"
+                        cell_tot.alignment = Alignment(horizontal="right", vertical="center")
+                    elif h == "Credit":
+                        cell_tot.value = total_credits
+                        cell_tot.font = credit_font
+                        cell_tot.number_format = "#,##0.00"
+                        cell_tot.alignment = Alignment(horizontal="right", vertical="center")
+                    elif h == "Balance" and c_idx == len(headers):
+                        close_bal = extraction.get("closing_balance")
+                        if close_bal is not None:
+                            cell_tot.value = close_bal
+                        elif rows and isinstance(rows[-1][-1], (int, float)):
+                            cell_tot.value = rows[-1][-1]
+                        cell_tot.font = bold_font
+                        cell_tot.number_format = "#,##0.00"
+                        cell_tot.alignment = Alignment(horizontal="right", vertical="center")
+                    elif h in ["Amount", "Total"] and c_idx == len(headers):
+                        doc_total = extraction.get("total")
+                        cell_tot.value = doc_total if doc_total is not None else total_amount_sum
+                        cell_tot.font = bold_font
+                        cell_tot.number_format = "#,##0.00"
+                        cell_tot.alignment = Alignment(horizontal="right", vertical="center")
+
+        elif raw_text:
+            ws_ledger.cell(row=4, column=1, value="Extracted Content").font = header_font
+            ws_ledger.cell(row=4, column=1).fill = navy_dark
+            ws_ledger.cell(row=4, column=1).border = border_all
+            for idx, line in enumerate(raw_text.splitlines()[:100], start=5):
+                cell_line = ws_ledger.cell(row=idx, column=1, value=line)
+                cell_line.font = regular_font
+                cell_line.border = border_all
+
+        for col_idx in range(1, ws_ledger.max_column + 1):
+            col_letter = get_column_letter(col_idx)
             max_len = 0
-            col_letter = get_column_letter(col[0].column)
-            for cell in col:
-                val = str(cell.value or "")
+            for row_idx in range(4, ws_ledger.max_row + 1):
+                val = str(ws_ledger.cell(row=row_idx, column=col_idx).value or "")
                 max_len = max(max_len, len(val))
-            ws_ledger.column_dimensions[col_letter].width = max(min(max_len + 4, 45), 15)
+            ws_ledger.column_dimensions[col_letter].width = max(min(max_len + 4, 45), 14)
 
         output = io.BytesIO()
         wb.save(output)
         return output.getvalue()
+
+    @staticmethod
+    def _get_excel_kpi_cards(
+        doc_type: str,
+        extraction: Dict[str, Any],
+        analytics: FinancialAnalytics,
+        kpi_green: Font,
+        kpi_red: Font,
+        kpi_blue: Font,
+        kpi_purple: Font,
+        fills: List[PatternFill],
+    ) -> List[Tuple[str, Any, Font, PatternFill]]:
+        """Returns 4 customized KPI cards per document type for Excel."""
+        if doc_type == "bank_statement":
+            return [
+                ("TOTAL INFLOW / CREDITS", analytics.total_inflow, kpi_green, fills[0]),
+                ("TOTAL OUTFLOW / DEBITS", analytics.total_outflow, kpi_red, fills[1]),
+                ("NET CASHFLOW / SAVINGS", analytics.net_savings, kpi_blue, fills[2]),
+                ("ACTIVE SUBSCRIPTIONS", f"{analytics.subscription_count} ({analytics.subscription_total:,.2f})", kpi_purple, fills[3]),
+            ]
+        elif doc_type == "invoice":
+            subtotal = extraction.get("subtotal") or 0.0
+            tax = extraction.get("tax") or 0.0
+            total = extraction.get("total") or (subtotal + tax)
+            return [
+                ("SUBTOTAL (EXCL. TAX)", subtotal, kpi_blue, fills[2]),
+                ("TOTAL TAX / VAT", tax, kpi_purple, fills[3]),
+                ("INVOICE TOTAL DUE", total, kpi_green, fills[0]),
+                ("EXTRACTION STATUS", "VERIFIED", kpi_green, fills[4]),
+            ]
+        elif doc_type == "receipt":
+            subtotal = extraction.get("subtotal") or 0.0
+            tax = extraction.get("tax") or 0.0
+            total = extraction.get("total") or (subtotal + tax)
+            merchant = extraction.get("merchant") or "Merchant"
+            cat = AnalyticsService.categorize_description(str(merchant))
+            return [
+                ("TOTAL PAID", total, kpi_green, fills[0]),
+                ("SUBTOTAL", subtotal, kpi_blue, fills[2]),
+                ("TAX / DUTY", tax, kpi_purple, fills[3]),
+                ("EXPENSE CATEGORY", cat, kpi_blue, fills[4]),
+            ]
+        else:
+            return [
+                ("PROCESSING STATUS", "SUCCESS", kpi_green, fills[0]),
+                ("EXTRACTED ATTRIBUTES", len(extraction), kpi_blue, fills[2]),
+                ("AI VERIFICATION", "PASSED", kpi_green, fills[4]),
+                ("EXPORT FORMAT", "MULTI-SHEET", kpi_purple, fills[3]),
+            ]
 
     # =========================================================================
     # 2. CSV EXPORT
@@ -428,15 +565,11 @@ class ExportService:
         styles = cls._init_pdf_styles()
         story: List[Any] = []
 
-        # ---------------------------------------------------------------------
-        # 1. TOP BRANDED HEADER WITH DUAL ACCENT BORDER
-        # ---------------------------------------------------------------------
+        # 1. Top Header
         story.extend(cls._build_header_flowables(doc_id, document_type, extraction, styles))
         story.append(Spacer(1, 8))
 
-        # ---------------------------------------------------------------------
-        # 2. DOCUMENT-SPECIFIC STORY BLOCKS
-        # ---------------------------------------------------------------------
+        # 2. Document-Specific Blocks
         if document_type == "bank_statement":
             story.extend(cls._build_bank_statement_story(doc_id, extraction, analytics, styles))
         elif document_type == "invoice":
@@ -446,7 +579,6 @@ class ExportService:
         else:
             story.extend(cls._build_general_document_story(doc_id, document_type, extraction, analytics, raw_text, styles))
 
-        # Build PDF using NumberedCanvas
         doc.build(story, canvasmaker=NumberedCanvas)
         return buf.getvalue()
 
@@ -458,7 +590,6 @@ class ExportService:
         styles = getSampleStyleSheet()
         custom = {}
 
-        # Brand / Title Styles
         custom["Badge"] = ParagraphStyle(
             "Badge",
             parent=styles["Normal"],
@@ -501,7 +632,6 @@ class ExportService:
             fontName="Helvetica-Bold",
         )
 
-        # Metadata Card Styles
         custom["MetaCardLabel"] = ParagraphStyle(
             "MetaCardLabel",
             fontSize=6.5,
@@ -524,7 +654,6 @@ class ExportService:
             fontName="Helvetica",
         )
 
-        # KPI Typography
         custom["KPILabelG"] = ParagraphStyle("KPILabelG", fontSize=6.5, leading=8, textColor=colors.HexColor("#065F46"), fontName="Helvetica-Bold", alignment=1)
         custom["KPIValG"] = ParagraphStyle("KPIValG", fontSize=12, leading=14, textColor=colors.HexColor("#059669"), fontName="Helvetica-Bold", alignment=1)
         custom["KPISubG"] = ParagraphStyle("KPISubG", fontSize=6.5, leading=8, textColor=colors.HexColor("#047857"), fontName="Helvetica", alignment=1)
@@ -541,7 +670,6 @@ class ExportService:
         custom["KPIValP"] = ParagraphStyle("KPIValP", fontSize=12, leading=14, textColor=colors.HexColor("#7C3AED"), fontName="Helvetica-Bold", alignment=1)
         custom["KPISubP"] = ParagraphStyle("KPISubP", fontSize=6.5, leading=8, textColor=colors.HexColor("#6D28D9"), fontName="Helvetica", alignment=1)
 
-        # Table Styles
         custom["TH"] = ParagraphStyle("TH", fontSize=7.5, leading=9, textColor=colors.white, fontName="Helvetica-Bold", alignment=0)
         custom["THCenter"] = ParagraphStyle("THCenter", fontSize=7.5, leading=9, textColor=colors.white, fontName="Helvetica-Bold", alignment=1)
         custom["THRight"] = ParagraphStyle("THRight", fontSize=7.5, leading=9, textColor=colors.white, fontName="Helvetica-Bold", alignment=2)
@@ -555,7 +683,6 @@ class ExportService:
         custom["TDFooterLeft"] = ParagraphStyle("TDFooterLeft", fontSize=7.5, leading=9.5, textColor=colors.HexColor("#0F172A"), fontName="Helvetica-Bold", alignment=0)
         custom["TDFooterRight"] = ParagraphStyle("TDFooterRight", fontSize=7.5, leading=9.5, textColor=colors.HexColor("#0F172A"), fontName="Helvetica-Bold", alignment=2)
 
-        # AI Insights
         custom["InsightHeading"] = ParagraphStyle("InsightHeading", fontSize=8.5, leading=11, textColor=colors.HexColor("#065F46"), fontName="Helvetica-Bold")
         custom["InsightBullet"] = ParagraphStyle("InsightBullet", fontSize=7.5, leading=10.5, textColor=colors.HexColor("#1E293B"), fontName="Helvetica")
 
@@ -569,7 +696,6 @@ class ExportService:
         doc_type_clean = document_type.replace("_", " ").upper()
         now_formatted = datetime.now(timezone.utc).strftime("%B %d, %Y")
 
-        # Extract primary institution/entity name for title
         entity_name = ""
         if document_type == "bank_statement":
             entity_name = str(extraction.get("bank_name") or "Bank Statement")
@@ -609,7 +735,6 @@ class ExportService:
             ])
         )
 
-        # Dual tone top accent divider
         divider_table = Table([["", ""]], colWidths=[5.0 * inch, 2.72 * inch], rowHeights=[2.5])
         divider_table.setStyle(
             TableStyle([
@@ -637,7 +762,6 @@ class ExportService:
     ) -> List[Any]:
         story: List[Any] = []
 
-        # 1. 4 Executive KPI Cards
         card1 = [
             Paragraph("TOTAL INFLOW / CREDITS", styles["KPILabelG"]),
             Spacer(1, 2),
@@ -685,7 +809,6 @@ class ExportService:
         story.append(kpi_table)
         story.append(Spacer(1, 8))
 
-        # 2. Account Information & Balance Audit (Side-by-Side Dual Card)
         open_bal = extraction.get("opening_balance")
         close_bal = extraction.get("closing_balance")
         cur = extraction.get("currency") or "INR"
@@ -727,7 +850,6 @@ class ExportService:
         story.append(meta_table)
         story.append(Spacer(1, 8))
 
-        # 3. AI Financial Intelligence & Expense Analysis
         if analytics.ai_insights:
             insight_flowables = [
                 Paragraph("<b>💡 AI Financial Insights & Expense Analysis</b>", styles["InsightHeading"]),
@@ -749,7 +871,6 @@ class ExportService:
             story.append(ins_table)
             story.append(Spacer(1, 8))
 
-        # 4. Expense Categorization Breakdown Table with Graphical Visual Progress Bars
         if analytics.categories and len(analytics.categories) > 0:
             story.append(Paragraph("<b>📊 Expense Breakdown by Category</b>", styles["SectionTitle"]))
             story.append(Spacer(1, 3))
@@ -790,7 +911,6 @@ class ExportService:
             story.append(cat_table)
             story.append(Spacer(1, 8))
 
-        # 5. Itemized Transaction Ledger
         headers, rows = cls._get_table_data_with_category("bank_statement", extraction)
         if headers and rows:
             story.append(Paragraph("<b>📑 Itemized Transaction Ledger</b>", styles["SectionTitle"]))
@@ -833,7 +953,6 @@ class ExportService:
                     bal_p,
                 ])
 
-            # Totals Summary Footer Row
             table_data.append([
                 Paragraph("<b>TOTALS</b>", styles["TDFooterLeft"]),
                 Paragraph("", styles["TD"]),
@@ -879,7 +998,6 @@ class ExportService:
         total = extraction.get("total") or (subtotal + tax)
         cur = extraction.get("currency") or "USD"
 
-        # 1. 4 Invoice KPI Cards
         card1 = [
             Paragraph("SUBTOTAL (EXCL. TAX)", styles["KPILabelB"]),
             Spacer(1, 2),
@@ -927,7 +1045,6 @@ class ExportService:
         story.append(kpi_table)
         story.append(Spacer(1, 8))
 
-        # 2. Supplier (Billed From) & Customer (Billed To) Cards
         supplier = extraction.get("supplier") or {}
         customer = extraction.get("customer") or {}
 
@@ -960,7 +1077,6 @@ class ExportService:
         story.append(entity_table)
         story.append(Spacer(1, 8))
 
-        # 3. Invoice Metadata Bar (Invoice #, Date, Due Date, Terms)
         meta_bar = [
             [
                 Paragraph("<b>Invoice Number</b>", styles["MetaCardLabel"]),
@@ -987,7 +1103,6 @@ class ExportService:
         story.append(meta_bar_table)
         story.append(Spacer(1, 8))
 
-        # 4. Itemized Line Items Table
         line_items = extraction.get("line_items", [])
         if line_items:
             story.append(Paragraph("<b>📑 Invoice Line Items & Breakdown</b>", styles["SectionTitle"]))
@@ -1020,7 +1135,6 @@ class ExportService:
                     Paragraph(f"{amt:,.2f}" if isinstance(amt, (int, float)) else str(amt), styles["TDRight"]),
                 ])
 
-            # Summary Footer
             table_data.append([
                 Paragraph("<b>TOTAL PAYABLE</b>", styles["TDFooterLeft"]),
                 Paragraph("", styles["TD"]),
@@ -1068,7 +1182,6 @@ class ExportService:
         merchant = extraction.get("merchant") or "Store Merchant"
         primary_cat = AnalyticsService.categorize_description(str(merchant))
 
-        # 1. 4 Receipt KPI Cards
         card1 = [
             Paragraph("TOTAL PAID", styles["KPILabelG"]),
             Spacer(1, 2),
@@ -1116,7 +1229,6 @@ class ExportService:
         story.append(kpi_table)
         story.append(Spacer(1, 8))
 
-        # 2. Receipt Details Grid
         details_data = [
             [
                 Paragraph("<b>Merchant:</b>", styles["MetaCardLabel"]),
@@ -1143,7 +1255,6 @@ class ExportService:
         story.append(details_table)
         story.append(Spacer(1, 8))
 
-        # 3. Itemized Line Items
         line_items = extraction.get("line_items", [])
         if line_items:
             story.append(Paragraph("<b>🛒 Purchased Line Items</b>", styles["SectionTitle"]))
@@ -1173,7 +1284,6 @@ class ExportService:
                     Paragraph(f"{i_total:,.2f}" if isinstance(i_total, (int, float)) else str(i_total), styles["TDRight"]),
                 ])
 
-            # Totals row
             table_data.append([
                 Paragraph("<b>TOTAL PAID</b>", styles["TDFooterLeft"]),
                 Paragraph("", styles["TD"]),
@@ -1214,7 +1324,6 @@ class ExportService:
     ) -> List[Any]:
         story: List[Any] = []
 
-        # Key-Value Properties
         if extraction:
             story.append(Paragraph("<b>📋 Extracted Document Attributes</b>", styles["SectionTitle"]))
             story.append(Spacer(1, 4))
@@ -1340,10 +1449,11 @@ class ExportService:
         elif doc_type == "invoice":
             items = extraction.get("line_items", [])
             if items:
-                headers = ["Description", "Quantity", "Unit Price", "Tax Rate", "Amount"]
+                headers = ["Description", "Category", "Quantity", "Unit Price", "Tax Rate", "Amount"]
                 rows = [
                     [
                         item.get("description") or "-",
+                        AnalyticsService.categorize_description(str(item.get("description") or "")),
                         item.get("quantity") if item.get("quantity") is not None else "",
                         item.get("unit_price") if item.get("unit_price") is not None else "",
                         item.get("tax_rate") if item.get("tax_rate") is not None else "",
