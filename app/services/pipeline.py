@@ -25,6 +25,7 @@ from app.services.deepseek_client import DeepSeekClient
 from app.services.ai_cleaner import AICleaner
 from app.services.classifier import DocumentClassifier
 from app.services.extractor import StructuredExtractor
+from app.services.result_cache import ResultCache
 
 logger = logging.getLogger("pipeline")
 
@@ -162,7 +163,7 @@ class ExtractionPipeline:
             stage_timings_ms=stage_timings,
         )
 
-        return ExtractionResponse(
+        response_obj = ExtractionResponse(
             id=req_id,
             status=ExtractionStatus.SUCCESS if raw_text else ExtractionStatus.PARTIAL_SUCCESS,
             document_type=effective_doc_type,
@@ -173,3 +174,8 @@ class ExtractionPipeline:
             metadata=metadata,
             warnings=all_warnings,
         )
+
+        # Cache in-memory for download export by ID
+        ResultCache.set(req_id, response_obj.model_dump())
+
+        return response_obj

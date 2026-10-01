@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter
 
 from app.api.v1.endpoints.ocr import router as ocr_router
+from app.api.v1.endpoints.export import router as export_router
 
 router = APIRouter()
 
@@ -26,5 +27,6 @@ async def ping():
     return {"ping": "pong"}
 
 
-# Include OCR Endpoints
+# Include Functional Endpoints
 router.include_router(ocr_router)
+router.include_router(export_router)

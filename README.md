@@ -137,6 +137,32 @@ Extracts text and structured financial data from an uploaded file.
 
 ---
 
+### 📊 Document Export & Download Endpoints
+
+#### 1. `GET /api/v1/export/download/{id}?format=xlsx|csv|pdf`
+Download a previously extracted document directly by entering its unique Request ID.
+
+- **Query Parameters**:
+  - `format` (optional): `xlsx` (default, beautiful styled Excel), `csv` (RFC 4180 CSV), or `pdf` (corporate formatted PDF).
+- **Responses**:
+  - `200 OK`: Binary file stream with `Content-Disposition: attachment; filename="<doc_type>_<id>.<ext>"`
+  - `404 Not Found`: If the document ID has expired from temporary memory or does not exist.
+
+#### 2. `POST /api/v1/export/generate?format=xlsx|csv|pdf`
+Directly convert an extraction JSON response into a styled Excel, CSV, or PDF file for immediate download.
+
+- **Request Body**:
+```json
+{
+  "id": "req_12345",
+  "document_type": "bank_statement",
+  "extraction": { ... },
+  "raw_text": "..."
+}
+```
+
+---
+
 ## 🛠️ Setup & Running
 
 ### 1. Environment Setup
