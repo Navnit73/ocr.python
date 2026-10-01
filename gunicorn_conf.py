@@ -14,8 +14,8 @@ backlog = 2048
 default_workers = (multiprocessing.cpu_count() * 2) + 1
 workers = int(os.getenv("WORKERS", min(default_workers, 4)))
 worker_class = "uvicorn.workers.UvicornWorker"
-worker_connections = 1000
-timeout = int(os.getenv("TIMEOUT", "60"))
+timeout = int(os.getenv("TIMEOUT", "180"))
+graceful_timeout = 30
 keepalive = 5
 
 # Process naming
