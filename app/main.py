@@ -67,6 +67,8 @@ def create_application() -> FastAPI:
         description=(
             "### 🚀 Enterprise AI-Powered Document OCR & Financial Intelligence API\n\n"
             "An ultra-fast, stateless REST API to extract, clean, structure, and export documents:\n\n"
+            "- **Authentication**: Use `X-API-Key` header or `Authorization: Bearer <key>` (click **Authorize** above)\n"
+            "- **Rate Limiting**: Protected with in-memory sliding window limiter\n"
             "- **Supported Documents**: Bank Statements, Invoices, Receipts, Tax Docs, General PDFs & Scanned Images\n"
             "- **Capacity**: Up to **200 pages** per PDF and up to **100MB** payload size\n"
             "- **3-Layer Output**: Layer 1 (Raw OCR), Layer 2 (Prompt-Injection-Safe Cleaned Text), Layer 3 (Pydantic-Validated Structured JSON)\n"
@@ -76,11 +78,21 @@ def create_application() -> FastAPI:
             "- **Stateless**: No MongoDB, Redis, or Celery required. In-memory TTL caching with guaranteed temporary file cleanup."
         ),
         openapi_tags=tags_metadata,
-        docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json",
+        docs_url="/docs" if settings.enable_docs else None,
+        redoc_url="/redoc" if settings.enable_docs else None,
+        openapi_url="/openapi.json" if settings.enable_docs else None,
         lifespan=lifespan,
     )
+
+    # Security Headers Middleware
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
 
     # CORS Middleware
     app.add_middleware(
@@ -97,6 +109,7 @@ def create_application() -> FastAPI:
         req_id = request.headers.get("X-Request-ID", "unknown")
         return JSONResponse(
             status_code=exc.status_code,
+            headers=exc.headers,
             content={
                 "id": req_id,
                 "status": "error",

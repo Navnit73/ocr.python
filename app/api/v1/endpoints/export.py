@@ -1,10 +1,12 @@
 """
-Export API Endpoints for Excel (.xlsx), CSV, PDF, OFX (QuickBooks), QBO, QIF, and Consolidation.
+Export API Endpoints with API Key Authentication, Rate Limiting, and IDOR Ownership Verification.
 """
 
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
+from app.core.rate_limiter import check_rate_limit
+from app.core.security import AuthenticatedClient, verify_api_key
 from app.schemas.batch import ConsolidationRequest, ConsolidationResponse
 from app.schemas.export import DirectExportRequest, ExportFormatEnum
 from app.services.consolidation_service import ConsolidationService
@@ -16,9 +18,10 @@ router = APIRouter(prefix="/export", tags=["Export & Accounting Downloads"])
 
 @router.get(
     "/download/{id}",
-    summary="Download Extracted Data by Document ID",
+    summary="Download Extracted Data by Document ID (Owner-Protected)",
     description=(
         "Download previously extracted document data by its unique Request ID.\n\n"
+        "**Security & IDOR Defense**: The caller's API Key must match the owner who performed the extraction.\n"
         "**Supported Formats**:\n"
         "- `xlsx`: Executive multi-sheet Excel with Dashboard & Ledger\n"
         "- `pdf`: Fintech-styled executive PDF report with KPI cards & category progress bars\n"
@@ -39,8 +42,11 @@ router = APIRouter(prefix="/export", tags=["Export & Accounting Downloads"])
                 "application/x-qif": {},
             },
         },
+        401: {"description": "Missing or invalid API key"},
+        403: {"description": "Access denied (IDOR attempt on another user's document)"},
         404: {"description": "Document ID not found or expired"},
     },
+    dependencies=[Depends(check_rate_limit)],
 )
 async def download_by_id(
     id: str,
@@ -48,18 +54,28 @@ async def download_by_id(
         default=ExportFormatEnum.XLSX,
         description="Desired format: xlsx, pdf, csv, ofx, qbo, or qif",
     ),
+    auth_client: AuthenticatedClient = Depends(verify_api_key),
 ):
     """
     Retrieves cached document extraction by ID and generates the selected file format.
+    Enforces owner-key matching to eliminate IDOR / BOLA vulnerabilities.
     """
-    cached = ResultCache.get(id)
-    if not cached:
+    entry = ResultCache.get_with_owner(id)
+    if not entry:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
                 f"Extraction result with ID '{id}' was not found or has expired from temporary memory. "
                 "You can re-upload the document or use POST /api/v1/export/generate with the extraction payload."
             ),
+        )
+
+    owner_hash, cached = entry
+    # Enforce ownership: reject if document was created by another API key
+    if owner_hash and owner_hash != auth_client.key_hash:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: Document '{id}' belongs to another account.",
         )
 
     doc_type = cached.get("document_type", "general")
@@ -88,7 +104,8 @@ async def download_by_id(
     "/generate",
     summary="Directly Generate and Download Export from JSON Payload",
     description=(
-        "Generate an Excel (.xlsx), PDF (.pdf), CSV (.csv), OFX (.ofx), QBO (.qbo), or QIF (.qif) directly from an extraction JSON payload."
+        "Generate an Excel (.xlsx), PDF (.pdf), CSV (.csv), OFX (.ofx), QBO (.qbo), or QIF (.qif) directly from an extraction JSON payload.\n\n"
+        "**Authentication**: Requires valid `X-API-Key` or `Authorization: Bearer <key>`."
     ),
     responses={
         200: {
@@ -103,6 +120,7 @@ async def download_by_id(
             },
         }
     },
+    dependencies=[Depends(check_rate_limit)],
 )
 async def generate_direct_export(
     payload: DirectExportRequest,
@@ -110,6 +128,7 @@ async def generate_direct_export(
         default=ExportFormatEnum.XLSX,
         description="Desired format: xlsx, pdf, csv, ofx, qbo, or qif",
     ),
+    auth_client: AuthenticatedClient = Depends(verify_api_key),
 ):
     """
     Converts a JSON extraction payload directly into a downloadable file.
@@ -138,24 +157,35 @@ async def generate_direct_export(
     description=(
         "Merges multiple monthly bank statements or receipts into a consolidated annual financial summary.\n\n"
         "- If `as_excel=true` (default): Returns a downloadable `.xlsx` workbook with Monthly P&L and Master Ledger.\n"
-        "- If `as_excel=false`: Returns consolidated JSON analytics with monthly trends."
+        "- If `as_excel=false`: Returns consolidated JSON analytics with monthly trends.\n\n"
+        "**Authentication**: Requires valid `X-API-Key` or `Authorization: Bearer <key>`."
     ),
+    dependencies=[Depends(check_rate_limit)],
 )
 async def consolidate_statements(
     payload: ConsolidationRequest,
     as_excel: bool = Query(default=True, description="Whether to return a downloadable Excel spreadsheet or JSON response"),
+    auth_client: AuthenticatedClient = Depends(verify_api_key),
 ):
     """
     Consolidates multiple extractions into an Annual / Multi-Month report.
+    Validates ownership of any referenced request_ids.
     """
     extractions = []
 
-    # Gather extractions from cache IDs if provided
+    # Gather extractions from cache IDs if provided, verifying caller ownership
     if payload.request_ids:
         for rid in payload.request_ids:
-            c = ResultCache.get(rid)
-            if c and c.get("extraction"):
-                extractions.append(c["extraction"])
+            entry = ResultCache.get_with_owner(rid)
+            if entry:
+                owner_hash, cached = entry
+                if owner_hash and owner_hash != auth_client.key_hash:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"Access denied: Statement '{rid}' belongs to another account.",
+                    )
+                if cached.get("extraction"):
+                    extractions.append(cached["extraction"])
 
     # Gather direct extractions if provided
     if payload.extractions:

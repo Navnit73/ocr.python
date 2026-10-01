@@ -26,6 +26,7 @@ class BatchService:
         document_type: str = DocumentTypeEnum.AUTO.value,
         language: str = "en",
         clean_with_ai: bool = True,
+        owner_hash: Optional[str] = None,
         pipeline: Optional[ExtractionPipeline] = None,
     ) -> BatchExtractionResponse:
         """
@@ -89,6 +90,7 @@ class BatchService:
                         document_type=document_type,
                         language=language,
                         clean_with_ai=clean_with_ai,
+                        owner_hash=owner_hash,
                     )
                     dur_ms = int((time.perf_counter() - t0) * 1000)
                     return BatchItemResult(

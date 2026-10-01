@@ -21,6 +21,9 @@ def create_mock_pdf_bytes(text: str = "INVOICE #INV-999 Total: 500 USD") -> byte
     return pdf_bytes
 
 
+AUTH_HEADERS = {"X-API-Key": "ocr_dev_key_secret_2026"}
+
+
 @pytest.mark.asyncio
 async def test_batch_extract_multiple_files():
     transport = ASGITransport(app=app)
@@ -34,7 +37,7 @@ async def test_batch_extract_multiple_files():
         ]
         data = {"document_type": "auto", "clean_with_ai": "false"}
 
-        res = await client.post("/api/v1/ocr/batch", files=files, data=data)
+        res = await client.post("/api/v1/ocr/batch", files=files, data=data, headers=AUTH_HEADERS)
         assert res.status_code == 200
         json_data = res.json()
         assert json_data["total_files"] == 2
@@ -56,7 +59,7 @@ async def test_batch_extract_zip_archive():
         files = [("files", ("archive.zip", zip_buf.getvalue(), "application/zip"))]
         data = {"document_type": "auto", "clean_with_ai": "false"}
 
-        res = await client.post("/api/v1/ocr/batch", files=files, data=data)
+        res = await client.post("/api/v1/ocr/batch", files=files, data=data, headers=AUTH_HEADERS)
         assert res.status_code == 200
         json_data = res.json()
         assert json_data["total_files"] == 2
@@ -76,7 +79,7 @@ async def test_async_extraction_with_callback_url():
             "clean_with_ai": "false",
         }
 
-        res = await client.post("/api/v1/ocr/extract", files=files, data=data)
+        res = await client.post("/api/v1/ocr/extract", files=files, data=data, headers=AUTH_HEADERS)
         assert res.status_code == 202
         json_data = res.json()
         assert json_data["status"] == "processing"

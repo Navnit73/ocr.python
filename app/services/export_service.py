@@ -86,6 +86,22 @@ class NumberedCanvas(canvas.Canvas):
         self.restoreState()
 
 
+def sanitize_for_formula_injection(val: Any) -> Any:
+    """
+    Neutralizes CSV/Excel formula injection (e.g. =cmd|' /C calc'!A0, @SUM, +...).
+    Prepends a single quote to non-numeric strings starting with dangerous formula characters.
+    """
+    if isinstance(val, str):
+        val_str = val.strip()
+        if val_str and val_str[0] in ("=", "+", "-", "@", "\t", "\r"):
+            try:
+                float(val_str)
+                return val
+            except ValueError:
+                return "'" + val
+    return val
+
+
 class ExportService:
     """Generates styled Excel, CSV, and PDF documents from extraction data."""
 
@@ -102,37 +118,40 @@ class ExportService:
         Main export dispatcher.
         Returns: (file_bytes, media_type, filename)
         """
+        import re
+        safe_doc_id = re.sub(r"[^a-zA-Z0-9_\-]", "", str(doc_id)) or "document"
+        safe_doc_type = re.sub(r"[^a-zA-Z0-9_]", "", str(document_type)) or "export"
         fmt = export_format.lower().strip()
         data = extraction or {}
         analytics = AnalyticsService.analyze(document_type, data)
 
         if fmt in [ExportFormatEnum.XLSX.value, ExportFormatEnum.EXCEL.value]:
-            file_bytes = cls.generate_excel(doc_id, document_type, data, analytics, raw_text)
+            file_bytes = cls.generate_excel(safe_doc_id, document_type, data, analytics, raw_text)
             media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            filename = f"{document_type}_{doc_id}.xlsx"
+            filename = f"{safe_doc_type}_{safe_doc_id}.xlsx"
         elif fmt == ExportFormatEnum.CSV.value:
-            file_bytes = cls.generate_csv(doc_id, document_type, data, analytics, raw_text)
+            file_bytes = cls.generate_csv(safe_doc_id, document_type, data, analytics, raw_text)
             media_type = "text/csv"
-            filename = f"{document_type}_{doc_id}.csv"
+            filename = f"{safe_doc_type}_{safe_doc_id}.csv"
         elif fmt == ExportFormatEnum.PDF.value:
-            file_bytes = cls.generate_pdf(doc_id, document_type, data, analytics, raw_text)
+            file_bytes = cls.generate_pdf(safe_doc_id, document_type, data, analytics, raw_text)
             media_type = "application/pdf"
-            filename = f"{document_type}_{doc_id}.pdf"
+            filename = f"{safe_doc_type}_{safe_doc_id}.pdf"
         elif fmt == ExportFormatEnum.OFX.value:
             from app.services.accounting_export_service import AccountingExportService
-            file_bytes = AccountingExportService.generate_ofx(doc_id, document_type, data, is_qbo=False)
+            file_bytes = AccountingExportService.generate_ofx(safe_doc_id, document_type, data, is_qbo=False)
             media_type = "application/x-ofx"
-            filename = f"{document_type}_{doc_id}.ofx"
+            filename = f"{safe_doc_type}_{safe_doc_id}.ofx"
         elif fmt == ExportFormatEnum.QBO.value:
             from app.services.accounting_export_service import AccountingExportService
-            file_bytes = AccountingExportService.generate_ofx(doc_id, document_type, data, is_qbo=True)
+            file_bytes = AccountingExportService.generate_ofx(safe_doc_id, document_type, data, is_qbo=True)
             media_type = "application/vnd.intu.qbo"
-            filename = f"{document_type}_{doc_id}.qbo"
+            filename = f"{safe_doc_type}_{safe_doc_id}.qbo"
         elif fmt == ExportFormatEnum.QIF.value:
             from app.services.accounting_export_service import AccountingExportService
-            file_bytes = AccountingExportService.generate_qif(doc_id, document_type, data)
+            file_bytes = AccountingExportService.generate_qif(safe_doc_id, document_type, data)
             media_type = "application/x-qif"
-            filename = f"{document_type}_{doc_id}.qif"
+            filename = f"{safe_doc_type}_{safe_doc_id}.qif"
         else:
             raise ValueError(f"Unsupported export format '{export_format}'. Choose 'xlsx', 'csv', 'pdf', 'ofx', 'qbo', or 'qif'.")
 
@@ -1426,17 +1445,17 @@ class ExportService:
 
     @staticmethod
     def _get_table_data_with_category(doc_type: str, extraction: Dict[str, Any]) -> Tuple[List[str], List[List[Any]]]:
-        """Returns table data with auto-classified category column."""
+        """Returns table data with auto-classified category column and formula injection sanitization."""
         if doc_type == "bank_statement":
             txs = extraction.get("transactions", [])
             if txs:
                 headers = ["Date", "Category", "Description", "Reference", "Debit", "Credit", "Balance"]
                 rows = [
                     [
-                        t.get("date") or "-",
-                        AnalyticsService.categorize_description(str(t.get("description") or "")),
-                        t.get("description") or "-",
-                        t.get("reference") or "-",
+                        sanitize_for_formula_injection(t.get("date") or "-"),
+                        sanitize_for_formula_injection(AnalyticsService.categorize_description(str(t.get("description") or ""))),
+                        sanitize_for_formula_injection(t.get("description") or "-"),
+                        sanitize_for_formula_injection(t.get("reference") or "-"),
                         t.get("debit") if t.get("debit") is not None else "",
                         t.get("credit") if t.get("credit") is not None else "",
                         t.get("balance") if t.get("balance") is not None else "",
@@ -1451,8 +1470,8 @@ class ExportService:
                 headers = ["Description", "Category", "Quantity", "Unit Price", "Total"]
                 rows = [
                     [
-                        item.get("description") or "-",
-                        AnalyticsService.categorize_description(str(item.get("description") or "")),
+                        sanitize_for_formula_injection(item.get("description") or "-"),
+                        sanitize_for_formula_injection(AnalyticsService.categorize_description(str(item.get("description") or ""))),
                         item.get("quantity") if item.get("quantity") is not None else "",
                         item.get("unit_price") if item.get("unit_price") is not None else "",
                         item.get("total") if item.get("total") is not None else "",
@@ -1467,8 +1486,8 @@ class ExportService:
                 headers = ["Description", "Category", "Quantity", "Unit Price", "Tax Rate", "Amount"]
                 rows = [
                     [
-                        item.get("description") or "-",
-                        AnalyticsService.categorize_description(str(item.get("description") or "")),
+                        sanitize_for_formula_injection(item.get("description") or "-"),
+                        sanitize_for_formula_injection(AnalyticsService.categorize_description(str(item.get("description") or ""))),
                         item.get("quantity") if item.get("quantity") is not None else "",
                         item.get("unit_price") if item.get("unit_price") is not None else "",
                         item.get("tax_rate") if item.get("tax_rate") is not None else "",

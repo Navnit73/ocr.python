@@ -1,5 +1,5 @@
 """
-End-to-End Tests for OCR & Document Extraction API.
+End-to-End Tests for OCR & Document Extraction API with Authentication.
 """
 
 import io
@@ -9,6 +9,8 @@ import pymupdf
 from PIL import Image
 
 from app.main import app
+
+AUTH_HEADERS = {"X-API-Key": "ocr_dev_key_secret_2026"}
 
 
 def create_digital_pdf_bytes(text: str) -> bytes:
@@ -43,7 +45,7 @@ async def test_extract_digital_pdf_e2e():
             "request_id": "client_unique_id_999",
         }
 
-        response = await client.post("/api/v1/ocr/extract", files=files, data=data)
+        response = await client.post("/api/v1/ocr/extract", files=files, data=data, headers=AUTH_HEADERS)
         assert response.status_code == 200
         res_json = response.json()
 
@@ -71,7 +73,7 @@ async def test_extract_image_e2e():
             "clean_with_ai": "false",
         }
 
-        response = await client.post("/api/v1/ocr/extract", files=files, data=data)
+        response = await client.post("/api/v1/ocr/extract", files=files, data=data, headers=AUTH_HEADERS)
         assert response.status_code == 200
         res_json = response.json()
 
@@ -88,7 +90,7 @@ async def test_corrupted_upload_error():
         files = {
             "file": ("bad.pdf", b"corrupted header", "application/pdf")
         }
-        response = await client.post("/api/v1/ocr/extract", files=files)
+        response = await client.post("/api/v1/ocr/extract", files=files, headers=AUTH_HEADERS)
         assert response.status_code == 400
         res_json = response.json()
         assert res_json["status"] == "error"
@@ -118,7 +120,7 @@ async def test_extract_password_protected_pdf_e2e():
             "request_id": "req_enc_pdf_1",
         }
 
-        response = await client.post("/api/v1/ocr/extract", files=files, data=data)
+        response = await client.post("/api/v1/ocr/extract", files=files, data=data, headers=AUTH_HEADERS)
         assert response.status_code == 200
         res_json = response.json()
         assert res_json["id"] == "req_enc_pdf_1"

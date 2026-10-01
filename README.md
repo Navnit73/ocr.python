@@ -8,8 +8,11 @@ The API accepts large multi-page PDF documents (up to **200 pages** and **100MB*
 
 ## ✨ Key Features & Capabilities
 
+- **🔑 Enterprise API Key Auth**: Required on all extraction and export routes via `X-API-Key` header or `Authorization: Bearer <key>`. Constant-time verification prevents timing attacks.
+- **🛡️ In-Memory Sliding Window Rate Limiting**: Protects against flood attacks & API abuse with automatic HTTP 429 responses and `Retry-After` headers.
+- **🔒 IDOR & Cross-Tenant Defense**: Document IDs and cached extraction results are cryptographically scoped to the caller's API key. Access attempts across API keys are blocked with `403 Forbidden`.
+- **🧪 Formula Injection Sanitization**: All exported CSV, Excel, and accounting files automatically neutralize spreadsheet formula injection (`=`, `@`, `+`, `-`, `\t`, `\r`).
 - **🚀 High Capacity**: Supports documents up to **200 pages** per PDF and up to **100MB** payload size.
-- **🔒 Stateless & Secure**: Zero persistent storage (no MongoDB, Redis, or Celery). Temporary files are guaranteed to be cleaned up in `finally` blocks.
 - **⚡ Password-Protected PDFs**: Decrypt and extract password-protected statements and invoices on-the-fly.
 - **🧠 3-Layer Output Architecture**:
   - **Layer 1 (Raw OCR)**: Exact, unmodified text extracted via PyMuPDF (digital) or PaddleOCR (scanned).
@@ -41,21 +44,21 @@ FastAPI provides an interactive OpenAPI / Swagger UI testbed out of the box:
 - **ReDoc UI**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
 - **OpenAPI JSON**: [http://localhost:8000/openapi.json](http://localhost:8000/openapi.json)
 
-### How to Use Swagger UI (`/docs`)
+### How to Authenticate & Test in Swagger UI (`/docs`)
 1. Open [http://localhost:8000/docs](http://localhost:8000/docs) in your browser.
-2. Click on any endpoint to expand it (e.g., `POST /api/v1/ocr/extract`).
-3. Click the **"Try it out"** button in the top-right corner of the endpoint panel.
-4. Fill in the form fields:
-   - Click **"Choose File"** and select your PDF or image.
-   - Set `document_type` to `auto` or specific type (e.g., `bank_statement`).
-   - If password-protected, fill in `password`.
-   - To receive an async webhook, fill in `callback_url`.
-5. Click **"Execute"** to send the request.
-6. View the real-time formatted JSON response and timing breakdown in `metadata.stage_timings_ms`.
+2. Click the green **"Authorize"** button (top-right of Swagger UI).
+3. Enter your API Key in either `api_key_header_scheme` (`X-API-Key`) or `http_bearer_scheme` (Bearer token) (e.g. `ocr_dev_key_secret_2026`).
+4. Click **"Authorize"**, then click **"Close"**.
+5. Click on any endpoint (e.g., `POST /api/v1/ocr/extract`) and click **"Try it out"**.
+6. Upload your file and click **"Execute"**!
 
 ---
 
 ## 📡 API Reference & Endpoints
+
+All functional endpoints require API key authentication via header:
+- `X-API-Key: <YOUR_API_KEY>` or
+- `Authorization: Bearer <YOUR_API_KEY>`
 
 ### 1. Document OCR & Extraction
 
@@ -75,6 +78,7 @@ Extracts text and structured financial data from a single document.
 - **Example curl**:
 ```bash
 curl -X POST "http://localhost:8000/api/v1/ocr/extract" \
+  -H "X-API-Key: ocr_dev_key_secret_2026" \
   -F "file=@statement_jan2026.pdf" \
   -F "document_type=bank_statement" \
   -F "clean_with_ai=true"
@@ -94,6 +98,7 @@ Processes up to 50 documents or a `.zip` archive containing invoices, receipts, 
 - **Example curl**:
 ```bash
 curl -X POST "http://localhost:8000/api/v1/ocr/batch" \
+  -H "X-API-Key: ocr_dev_key_secret_2026" \
   -F "files=@invoices_q1.zip" \
   -F "document_type=invoice"
 ```
@@ -103,7 +108,7 @@ curl -X POST "http://localhost:8000/api/v1/ocr/batch" \
 ### 2. Export & Accounting Downloads
 
 #### `GET /api/v1/export/download/{id}?format=xlsx|pdf|csv|ofx|qbo|qif`
-Download an extracted document directly using its unique Request ID.
+Download an extracted document directly using its unique Request ID (protected with owner verification).
 
 - **Query Parameters**:
   - `format` (default `xlsx`): `xlsx`, `pdf`, `csv`, `ofx`, `qbo`, `qif`.
@@ -111,13 +116,16 @@ Download an extracted document directly using its unique Request ID.
 - **Example curl**:
 ```bash
 # Download Excel
-curl -OJ "http://localhost:8000/api/v1/export/download/req_12345?format=xlsx"
+curl -OJ "http://localhost:8000/api/v1/export/download/req_12345?format=xlsx" \
+  -H "X-API-Key: ocr_dev_key_secret_2026"
 
 # Download QuickBooks Online (.qbo)
-curl -OJ "http://localhost:8000/api/v1/export/download/req_12345?format=qbo"
+curl -OJ "http://localhost:8000/api/v1/export/download/req_12345?format=qbo" \
+  -H "X-API-Key: ocr_dev_key_secret_2026"
 
 # Download OFX for Xero / Tally
-curl -OJ "http://localhost:8000/api/v1/export/download/req_12345?format=ofx"
+curl -OJ "http://localhost:8000/api/v1/export/download/req_12345?format=ofx" \
+  -H "X-API-Key: ocr_dev_key_secret_2026"
 ```
 
 ---
@@ -170,7 +178,20 @@ Consolidates multiple extractions into an Annual / Multi-Month report.
   "request_ids": ["req_jan", "req_feb", "req_mar"]
 }
 ```
-- **Response**: Downloadable Multi-Sheet Excel Workbook with 12-Month Cashflow and Master Ledger (`as_excel=true`) or structured JSON analytics (`as_excel=false`).
+
+---
+
+## 🛡️ Security Audit & Threat Hardening Matrix
+
+| Attack Vector | Attacker Objective | Potential Damage | Implemented Remediation |
+|---|---|---|---|
+| **1. IDOR / ID Manipulation** | Guess/enumerate `id` in `/export/download/{id}` or `/export/consolidate` | Cross-tenant financial data theft | Scoped `owner_hash` tracking in `ResultCache`. Requests from a different API key are blocked with `403 Forbidden`. |
+| **2. Auth Bypass / No Token** | Call endpoints without authentication or with expired/forged keys | Unauthorized extraction & resource drain | `verify_api_key` dependency with constant-time comparison (`secrets.compare_digest`). Rejects unauthenticated calls with `401 Unauthorized`. |
+| **3. Privilege Escalation** | Forge roles in request headers or body | Unauthorized access | Stateless token-level API key authorization enforced server-side. No implicit elevated permissions. |
+| **4. Feature & Resource Abuse** | Flood API with rapid requests or oversized uploads (DoS/DDoS) | Exhaust server CPU & DeepSeek API credits | In-memory sliding window rate limiter (60 req/min per key/IP) returning `429 Too Many Requests` with `Retry-After`. Strict 100MB and 200 page limits. |
+| **5. Content & Formula Injection** | Inject `=cmd\|' /C calc'!A0` or XSS payloads in statements/descriptions | Remote Code Execution when opening downloaded Excel/CSV files | `sanitize_for_formula_injection` prepends `'` (apostrophe) to any formula characters (`=`, `@`, `+`, `-`, `\t`, `\r`). CRLF header injection prevented by sanitizing filenames. |
+| **6. Internal System Exposure** | Inspect error responses, health checks, or direct paths for secrets | Leaking environment variables or stack traces | Sanitized global JSON exception handlers suppress internal Python tracebacks. Safe security response headers (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `X-XSS-Protection: 1; mode=block`). |
+| **7. Business Logic Flaws** | Submit conflicting amounts to fool validation | Corrupted accounting records | Mathematical balance audits verify `opening + credits - debits == closing` and attach warnings rather than fabricating or falsifying numbers. |
 
 ---
 
@@ -208,6 +229,16 @@ PORT=8000
 WORKERS=1
 RELOAD=true
 
+# Security & API Keys (Comma-separated list of valid keys)
+API_KEYS=ocr_dev_key_secret_2026,ocr_test_key_master
+REQUIRE_API_KEY=true
+ENABLE_DOCS=true
+
+# Rate Limiting
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_REQUESTS_PER_MINUTE=60
+RATE_LIMIT_BURST=15
+
 # DeepSeek Configuration
 DEEPSEEK_API_KEY=your_actual_deepseek_api_key
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
@@ -239,12 +270,3 @@ gunicorn -c gunicorn_conf.py app.main:app
 ```bash
 pytest -v
 ```
-
----
-
-## 🔒 Security & Privacy
-
-- **Untrusted Input Defense**: DeepSeek system prompts explicitly treat all document content as untrusted input to defend against prompt-injection and override instructions.
-- **Arithmetic Integrity**: Balances and subtotals are audited mathematically with explicit warnings attached for discrepancies—raw figures are never silently modified.
-- **No Data Leakage**: Sensitive credentials, bank details, and raw documents are never logged or stored permanently.
-- **Webhook HMAC Signatures**: Webhook payloads are hashed with SHA256 using your shared `callback_secret` and transmitted via `X-Webhook-Signature`.

@@ -50,6 +50,19 @@ class Settings(BaseSettings):
     deepseek_model: str = Field(default="deepseek-chat", alias="DEEPSEEK_MODEL")
     deepseek_base_url: str = Field(default="https://api.deepseek.com/v1", alias="DEEPSEEK_BASE_URL")
 
+    # Security & API Authentication
+    api_keys: Union[str, List[str]] = Field(
+        default=["ocr_dev_key_secret_2026", "ocr_test_key_master"],
+        alias="API_KEYS",
+    )
+    require_api_key: bool = Field(default=True, alias="REQUIRE_API_KEY")
+    enable_docs: bool = Field(default=True, alias="ENABLE_DOCS")
+
+    # Rate Limiting Configuration
+    rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
+    rate_limit_requests_per_minute: int = Field(default=60, alias="RATE_LIMIT_REQUESTS_PER_MINUTE")
+    rate_limit_burst: int = Field(default=15, alias="RATE_LIMIT_BURST")
+
     # Allowed Extensions & MIME Types
     allowed_extensions: List[str] = [
         ".pdf",
@@ -69,6 +82,20 @@ class Settings(BaseSettings):
         "image/webp",
         "image/tiff",
     ]
+
+    @field_validator("api_keys", mode="before")
+    @classmethod
+    def parse_api_keys(cls, value: Union[str, List[str]]) -> List[str]:
+        if isinstance(value, str):
+            value = value.strip()
+            if value.startswith("[") and value.endswith("]"):
+                import json
+                try:
+                    return json.loads(value)
+                except Exception:
+                    pass
+            return [k.strip() for k in value.split(",") if k.strip()]
+        return value
 
     @field_validator("allowed_origins", mode="before")
     @classmethod

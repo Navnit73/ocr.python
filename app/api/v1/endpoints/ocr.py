@@ -1,11 +1,13 @@
 """
-OCR & Extraction API Endpoints with Batch & Async Webhooks.
+OCR & Extraction API Endpoints with API Key Authentication, Rate Limiting, Batch & Async Webhooks.
 """
 
 from typing import List, Optional, Union
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, Response, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, Request, Response, UploadFile, status
 from pydantic import BaseModel
 
+from app.core.rate_limiter import check_rate_limit
+from app.core.security import AuthenticatedClient, verify_api_key
 from app.schemas.batch import BatchExtractionResponse
 from app.schemas.ocr import (
     DocumentTypeEnum,
@@ -43,6 +45,7 @@ async def _run_async_extraction_and_webhook(
     clean_with_ai: bool,
     client_request_id: str,
     password: Optional[str],
+    owner_hash: Optional[str],
     callback_url: str,
     callback_secret: Optional[str],
 ):
@@ -60,6 +63,7 @@ async def _run_async_extraction_and_webhook(
         clean_with_ai=clean_with_ai,
         client_request_id=client_request_id,
         password=password,
+        owner_hash=owner_hash,
     )
     await WebhookService.send_webhook(
         callback_url=callback_url,
@@ -77,8 +81,10 @@ async def _run_async_extraction_and_webhook(
         "Upload a bank statement, receipt, invoice, general document, PDF, or image (up to 200 pages / 100MB). "
         "Extracts OCR text, cleans it with DeepSeek AI, identifies document type, "
         "and returns structured 3-layer JSON (raw OCR, cleaned text, structured extraction).\n\n"
+        "**Authentication**: Requires valid `X-API-Key` or `Authorization: Bearer <key>`.\n"
         "**Async Mode**: If `callback_url` is provided, returns `202 Accepted` immediately and posts final extraction to your webhook."
     ),
+    dependencies=[Depends(check_rate_limit)],
 )
 async def extract_document(
     background_tasks: BackgroundTasks,
@@ -117,6 +123,7 @@ async def extract_document(
         alias="X-Request-ID",
         description="Optional custom request ID via HTTP Header",
     ),
+    auth_client: AuthenticatedClient = Depends(verify_api_key),
     pipeline: ExtractionPipeline = Depends(get_pipeline),
 ) -> Union[ExtractionResponse, AsyncAcceptedResponse]:
     """
@@ -141,6 +148,7 @@ async def extract_document(
             clean_with_ai=clean_with_ai,
             client_request_id=effective_request_id,
             password=password,
+            owner_hash=auth_client.key_hash,
             callback_url=callback_url,
             callback_secret=callback_secret,
         )
@@ -161,6 +169,7 @@ async def extract_document(
         clean_with_ai=clean_with_ai,
         client_request_id=effective_request_id,
         password=password,
+        owner_hash=auth_client.key_hash,
     )
 
 
@@ -171,8 +180,10 @@ async def extract_document(
     summary="Batch process multiple documents or a Zip archive",
     description=(
         "Upload up to 50 documents or a single `.zip` archive containing invoices, receipts, or statements. "
-        "Processes all files concurrently with isolated error handling and computes consolidated inflow/outflow metrics."
+        "Processes all files concurrently with isolated error handling and computes consolidated inflow/outflow metrics.\n\n"
+        "**Authentication**: Requires valid `X-API-Key` or `Authorization: Bearer <key>`."
     ),
+    dependencies=[Depends(check_rate_limit)],
 )
 async def batch_extract(
     files: List[UploadFile] = File(..., description="List of document files or a .zip archive (up to 50 files)"),
@@ -188,6 +199,7 @@ async def batch_extract(
         default=True,
         description="Whether to clean OCR text and extract structured entities using DeepSeek",
     ),
+    auth_client: AuthenticatedClient = Depends(verify_api_key),
     pipeline: ExtractionPipeline = Depends(get_pipeline),
 ) -> BatchExtractionResponse:
     """
@@ -198,5 +210,6 @@ async def batch_extract(
         document_type=document_type.value,
         language=language.value,
         clean_with_ai=clean_with_ai,
+        owner_hash=auth_client.key_hash,
         pipeline=pipeline,
     )

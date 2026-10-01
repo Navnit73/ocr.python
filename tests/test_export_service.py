@@ -162,8 +162,12 @@ def test_generate_pdf_invoice(sample_invoice_extraction):
 
 @pytest.mark.asyncio
 async def test_export_download_by_id_e2e(sample_bank_extraction):
-    # Seed cache
+    from app.core.security import hash_key
     doc_id = "cache_test_id_7788"
+    auth_headers = {"X-API-Key": "ocr_dev_key_secret_2026"}
+    owner_hash = hash_key("ocr_dev_key_secret_2026")
+
+    # Seed cache
     ResultCache.set(
         doc_id,
         {
@@ -172,25 +176,26 @@ async def test_export_download_by_id_e2e(sample_bank_extraction):
             "extraction": sample_bank_extraction,
             "raw_text": "Sample text",
         },
+        owner_hash=owner_hash,
     )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # 1. Download Excel
-        res_xlsx = await client.get(f"/api/v1/export/download/{doc_id}?format=xlsx")
+        res_xlsx = await client.get(f"/api/v1/export/download/{doc_id}?format=xlsx", headers=auth_headers)
         assert res_xlsx.status_code == 200
         assert "application/vnd.openxmlformats" in res_xlsx.headers["content-type"]
         assert "bank_statement_cache_test_id_7788.xlsx" in res_xlsx.headers["content-disposition"]
         assert res_xlsx.content[:2] == b"PK"
 
         # 2. Download CSV
-        res_csv = await client.get(f"/api/v1/export/download/{doc_id}?format=csv")
+        res_csv = await client.get(f"/api/v1/export/download/{doc_id}?format=csv", headers=auth_headers)
         assert res_csv.status_code == 200
         assert "text/csv" in res_csv.headers["content-type"]
         assert "bank_statement_cache_test_id_7788.csv" in res_csv.headers["content-disposition"]
 
         # 3. Download PDF
-        res_pdf = await client.get(f"/api/v1/export/download/{doc_id}?format=pdf")
+        res_pdf = await client.get(f"/api/v1/export/download/{doc_id}?format=pdf", headers=auth_headers)
         assert res_pdf.status_code == 200
         assert "application/pdf" in res_pdf.headers["content-type"]
         assert res_pdf.content.startswith(b"%PDF-")
@@ -198,15 +203,17 @@ async def test_export_download_by_id_e2e(sample_bank_extraction):
 
 @pytest.mark.asyncio
 async def test_export_download_not_found():
+    auth_headers = {"X-API-Key": "ocr_dev_key_secret_2026"}
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        res = await client.get("/api/v1/export/download/nonexistent_id_9999?format=xlsx")
+        res = await client.get("/api/v1/export/download/nonexistent_id_9999?format=xlsx", headers=auth_headers)
         assert res.status_code == 404
         assert "not found or has expired" in res.json()["error"]
 
 
 @pytest.mark.asyncio
 async def test_export_direct_generate_e2e(sample_bank_extraction):
+    auth_headers = {"X-API-Key": "ocr_dev_key_secret_2026"}
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         payload = {
@@ -215,7 +222,7 @@ async def test_export_direct_generate_e2e(sample_bank_extraction):
             "extraction": sample_bank_extraction,
             "raw_text": "Sample direct text",
         }
-        res = await client.post("/api/v1/export/generate?format=xlsx", json=payload)
+        res = await client.post("/api/v1/export/generate?format=xlsx", json=payload, headers=auth_headers)
         assert res.status_code == 200
         assert res.content[:2] == b"PK"
         assert "bank_statement_direct_req_123.xlsx" in res.headers["content-disposition"]

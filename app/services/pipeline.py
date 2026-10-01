@@ -50,6 +50,7 @@ class ExtractionPipeline:
         clean_with_ai: bool = True,
         client_request_id: Optional[str] = None,
         password: Optional[str] = None,
+        owner_hash: Optional[str] = None,
     ) -> ExtractionResponse:
         """
         Executes the full extraction pipeline for an uploaded file.
@@ -175,7 +176,7 @@ class ExtractionPipeline:
             warnings=all_warnings,
         )
 
-        # Cache in-memory for download export by ID
-        ResultCache.set(req_id, response_obj.model_dump())
+        # Cache in-memory for download export by ID (scoped with owner_hash to prevent IDOR)
+        ResultCache.set(req_id, response_obj.model_dump(), owner_hash=owner_hash)
 
         return response_obj
