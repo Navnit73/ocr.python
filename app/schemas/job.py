@@ -50,6 +50,7 @@ class JobStatusResponse(BaseModel):
     """Detailed job status and progress tracking representation."""
     job_id: str = Field(..., description="Unique job identifier")
     document_id: Optional[str] = Field(default=None, description="Document ID if available")
+    user_email: Optional[str] = Field(default=None, description="User email associated with job")
     status: JobStatusEnum = Field(..., description="Current status: queued, processing, completed, failed, cancelled")
     progress: int = Field(default=0, ge=0, le=100, description="Processing completion percentage (0-100)")
     total_pages: int = Field(default=0, ge=0, description="Total number of document pages")
@@ -81,6 +82,7 @@ class JobEventPayload(BaseModel):
     event: str
     job_id: str
     document_id: Optional[str] = None
+    user_email: Optional[str] = None
     status: JobStatusEnum
     progress: int
     total_pages: int

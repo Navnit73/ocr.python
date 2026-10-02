@@ -23,10 +23,14 @@ class JobRepository:
     async def create_job(cls, job_data: Dict[str, Any]) -> Dict[str, Any]:
         """Inserts a new job record in MongoDB."""
         now = datetime.now(timezone.utc)
+        user_email = (job_data.get("user_email") or job_data.get("metadata", {}).get("user_email") or "guest").lower().strip()
+        metadata = dict(job_data.get("metadata", {}))
+        metadata["user_email"] = user_email
         doc = {
             "job_id": job_data["job_id"],
             "document_id": job_data.get("document_id"),
             "user_id": job_data.get("user_id"),
+            "user_email": user_email,
             "status": job_data.get("status", "queued"),
             "progress": job_data.get("progress", 0),
             "total_pages": job_data.get("total_pages", 0),
@@ -47,7 +51,7 @@ class JobRepository:
             "language": job_data.get("language", "en"),
             "clean_with_ai": job_data.get("clean_with_ai", True),
             "password": job_data.get("password"),
-            "metadata": job_data.get("metadata", {}),
+            "metadata": metadata,
             "result": job_data.get("result"),
         }
         coll = cls._collection()

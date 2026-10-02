@@ -77,6 +77,8 @@ class WebhookService:
         metadata: Optional[Dict[str, Any]] = None,
         error: Optional[str] = None,
         result_url: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+        user_email: Optional[str] = None,
     ) -> bool:
         """
         Constructs and dispatches a standard WebhookPayload to the configured callback_url.
@@ -90,15 +92,19 @@ class WebhookService:
 
         event_id = f"evt_{uuid.uuid4().hex[:16]}"
         now = datetime.now(timezone.utc)
+        effective_metadata = dict(metadata or {})
+        normalized_email = (user_email or effective_metadata.get("user_email") or "guest").lower().strip()
+        effective_metadata["user_email"] = normalized_email
 
-        payload = {
+        payload: Dict[str, Any] = {
             "event": event_name,
             "event_id": event_id,
             "job_id": job_id,
             "document_id": document_id,
+            "user_email": normalized_email,
             "status": status,
             "timestamp": now.isoformat(),
-            "metadata": metadata or {},
+            "metadata": effective_metadata,
         }
         if progress is not None:
             payload["progress"] = progress
@@ -106,6 +112,11 @@ class WebhookService:
             payload["current_stage"] = current_stage
         if result_url:
             payload["result_url"] = result_url
+        if result is not None:
+            res_dict = dict(result)
+            if "metadata" in res_dict and isinstance(res_dict["metadata"], dict):
+                res_dict["metadata"]["user_email"] = normalized_email
+            payload["result"] = res_dict
         if error:
             payload["error"] = error
 

@@ -17,16 +17,16 @@ logger = logging.getLogger("celery.tasks")
     max_retries=3,
     default_retry_delay=10,
 )
-def process_ocr_document_task(self, job_id: str):
+def process_ocr_document_task(self, job_id: str, user_email: Optional[str] = None):
     """
     Celery task that executes background OCR processing.
     Runs the asynchronous WorkerManager.process_job in an event loop.
     """
-    logger.info(f"[Celery Worker] Received task for job: {job_id}")
+    logger.info(f"[Celery Worker] Received task for job: {job_id} (user: {user_email})")
 
     async def _run():
         await MongoDBManager.connect()
-        await WorkerManager.process_job(job_id)
+        await WorkerManager.process_job(job_id, user_email=user_email)
 
     try:
         loop = asyncio.get_event_loop()

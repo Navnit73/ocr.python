@@ -84,6 +84,10 @@ async def extract_document_async(
         default=None,
         description="Optional secret key for HMAC-SHA256 signature header (X-Webhook-Signature) on callback POST",
     ),
+    user_email: Optional[str] = Form(
+        default=None,
+        description="Optional user email from logged-in frontend session",
+    ),
     x_request_id: Optional[str] = Header(
         default=None,
         alias="X-Request-ID",
@@ -97,6 +101,7 @@ async def extract_document_async(
     effective_doc_id = FileValidator.generate_or_sanitize_request_id(request_id or x_request_id)
     job_id = f"job_{uuid.uuid4().hex[:12]}"
     filename = file.filename or "document.pdf"
+    normalized_email = (user_email or "guest").lower().strip()
 
     # Validate
     doc_category, file_bytes = await FileValidator.validate_upload(file)
@@ -113,6 +118,7 @@ async def extract_document_async(
         "job_id": job_id,
         "document_id": effective_doc_id,
         "user_id": auth_client.key_hash,
+        "user_email": normalized_email,
         "status": "queued",
         "progress": 0,
         "total_pages": 1,
@@ -132,12 +138,13 @@ async def extract_document_async(
             "file_size_bytes": file_size,
             "checksum_sha256": checksum,
             "doc_category": doc_category,
+            "user_email": normalized_email,
         },
     }
     await JobRepository.create_job(job_doc)
 
     # Submit to worker queue
-    await WorkerManager.submit_job(job_id)
+    await WorkerManager.submit_job(job_id, user_email=normalized_email)
 
     return JobCreateResponse(
         job_id=job_id,
@@ -196,6 +203,10 @@ async def extract_document(
         default=None,
         description="Optional secret key for HMAC-SHA256 signature header (X-Webhook-Signature) on callback POST.",
     ),
+    user_email: Optional[str] = Form(
+        default=None,
+        description="Optional user email from logged-in frontend session",
+    ),
     x_request_id: Optional[str] = Header(
         default=None,
         alias="X-Request-ID",
@@ -208,6 +219,7 @@ async def extract_document(
     Extracts text and structured entities. Automatically supports both synchronous and asynchronous workflows.
     """
     effective_request_id = FileValidator.generate_or_sanitize_request_id(request_id or x_request_id)
+    normalized_email = (user_email or "guest").lower().strip()
 
     # If async_mode requested or callback_url provided, route to background worker
     if async_mode or callback_url:
@@ -225,6 +237,7 @@ async def extract_document(
             "job_id": job_id,
             "document_id": effective_request_id,
             "user_id": auth_client.key_hash,
+            "user_email": normalized_email,
             "status": "queued",
             "progress": 0,
             "total_pages": 1,
@@ -244,10 +257,11 @@ async def extract_document(
                 "file_size_bytes": file_size,
                 "checksum_sha256": checksum,
                 "doc_category": doc_category,
+                "user_email": normalized_email,
             },
         }
         await JobRepository.create_job(job_doc)
-        await WorkerManager.submit_job(job_id)
+        await WorkerManager.submit_job(job_id, user_email=normalized_email)
 
         response.status_code = status.HTTP_202_ACCEPTED
         return AsyncAcceptedResponse(
@@ -271,6 +285,7 @@ async def extract_document(
         client_request_id=effective_request_id,
         password=password,
         owner_hash=auth_client.key_hash,
+        user_email=normalized_email,
     )
 
 
@@ -300,6 +315,10 @@ async def batch_extract(
         default=True,
         description="Whether to clean OCR text and extract structured entities using DeepSeek",
     ),
+    user_email: Optional[str] = Form(
+        default=None,
+        description="Optional user email from logged-in frontend session",
+    ),
     auth_client: AuthenticatedClient = Depends(verify_api_key),
     pipeline: ExtractionPipeline = Depends(get_pipeline),
 ) -> BatchExtractionResponse:
@@ -312,5 +331,6 @@ async def batch_extract(
         language=language.value,
         clean_with_ai=clean_with_ai,
         owner_hash=auth_client.key_hash,
+        user_email=user_email,
         pipeline=pipeline,
     )

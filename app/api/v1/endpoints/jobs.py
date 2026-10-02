@@ -70,6 +70,10 @@ async def upload_document_async(
         default=None,
         description="Optional secret key for HMAC-SHA256 signature verification on callback POST",
     ),
+    user_email: Optional[str] = Form(
+        default=None,
+        description="Optional user email from logged-in session",
+    ),
     x_request_id: Optional[str] = Header(
         default=None,
         alias="X-Request-ID",
@@ -84,6 +88,7 @@ async def upload_document_async(
     effective_doc_id = FileValidator.generate_or_sanitize_request_id(request_id or x_request_id)
     job_id = f"job_{uuid.uuid4().hex[:12]}"
     filename = file.filename or "document.pdf"
+    normalized_email = (user_email or "guest").lower().strip()
 
     # 1. Validate Upload
     doc_category, file_bytes = await FileValidator.validate_upload(file)
@@ -100,6 +105,7 @@ async def upload_document_async(
         "job_id": job_id,
         "document_id": effective_doc_id,
         "user_id": auth_client.key_hash,
+        "user_email": normalized_email,
         "status": "queued",
         "progress": 0,
         "total_pages": 1,
@@ -119,12 +125,13 @@ async def upload_document_async(
             "file_size_bytes": file_size,
             "checksum_sha256": checksum,
             "doc_category": doc_category,
+            "user_email": normalized_email,
         },
     }
     await JobRepository.create_job(job_doc)
 
     # 4. Submit Job to Background Worker
-    await WorkerManager.submit_job(job_id)
+    await WorkerManager.submit_job(job_id, user_email=normalized_email)
 
     return JobCreateResponse(
         job_id=job_id,
@@ -158,10 +165,12 @@ async def get_job_status(
 
     doc_id = job.get("document_id")
     result_url = f"/api/v1/documents/{doc_id}" if doc_id and job.get("status") == "completed" else None
+    user_email = job.get("user_email") or job.get("metadata", {}).get("user_email")
 
     return JobStatusResponse(
         job_id=job["job_id"],
         document_id=doc_id,
+        user_email=user_email,
         status=JobStatusEnum(job.get("status", "queued")),
         progress=job.get("progress", 0),
         total_pages=job.get("total_pages", 0),
@@ -255,6 +264,7 @@ async def list_jobs(
             JobStatusResponse(
                 job_id=job["job_id"],
                 document_id=doc_id,
+                user_email=job.get("user_email") or job.get("metadata", {}).get("user_email"),
                 status=JobStatusEnum(job.get("status", "queued")),
                 progress=job.get("progress", 0),
                 total_pages=job.get("total_pages", 0),

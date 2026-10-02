@@ -62,6 +62,7 @@ class ProcessingMetadata(BaseModel):
     ai_model: Optional[str] = None
     processing_time_ms: int = Field(default=0, ge=0)
     stage_timings_ms: Dict[str, int] = Field(default_factory=dict)
+    user_email: Optional[str] = Field(default=None, description="User email if provided")
 
 
 class ExtractionWarning(BaseModel):
@@ -82,3 +83,4 @@ class ExtractionResponse(BaseModel):
     pages: List[PageExtraction] = Field(default_factory=list)
     metadata: ProcessingMetadata
     warnings: List[ExtractionWarning] = Field(default_factory=list)
+    user_email: Optional[str] = Field(default=None, description="User email associated with extraction")

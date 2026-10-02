@@ -76,6 +76,7 @@ class ExtractionPipeline:
         password: Optional[str] = None,
         owner_hash: Optional[str] = None,
         job_id: Optional[str] = None,
+        user_email: Optional[str] = None,
         progress_callback: Optional[ProgressCallbackType] = None,
     ) -> ExtractionResponse:
         """
@@ -400,6 +401,7 @@ class ExtractionPipeline:
         stage_timings["structured_extraction"] = t_struct_extract_ms
 
         total_time_ms = int((time.perf_counter() - start_time) * 1000)
+        normalized_email = (user_email or "guest").lower().strip()
 
         metadata = ProcessingMetadata(
             pages=len(pages),
@@ -409,6 +411,7 @@ class ExtractionPipeline:
             ai_model=settings.deepseek_model if ai_cleaned_flag else None,
             processing_time_ms=total_time_ms,
             stage_timings_ms=stage_timings,
+            user_email=normalized_email,
         )
 
         response_obj = ExtractionResponse(
@@ -421,9 +424,10 @@ class ExtractionPipeline:
             pages=pages,
             metadata=metadata,
             warnings=all_warnings,
+            user_email=normalized_email,
         )
 
-        # 6. Persistence: Store in ResultCache and MongoDB DocumentRepository
+        # 6. Persistence: Store in ResultCache, DocumentRepository, and shared ExtractionRepository
         ResultCache.set(req_id, response_obj.model_dump(), owner_hash=owner_hash)
 
         try:
@@ -431,6 +435,7 @@ class ExtractionPipeline:
                 "document_id": req_id,
                 "job_id": job_id,
                 "user_id": owner_hash,
+                "user_email": normalized_email,
                 "filename": effective_filename,
                 "content_type": "application/pdf" if doc_category == "pdf" else "image/png",
                 "file_size_bytes": len(file_bytes),

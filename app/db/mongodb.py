@@ -100,13 +100,28 @@ class MongoDBManager:
             await jobs.create_index("job_id", unique=True)
             await jobs.create_index("document_id")
             await jobs.create_index("user_id")
+            await jobs.create_index("user_email")
             await jobs.create_index("status")
             await jobs.create_index("created_at")
+
+            # Extractions Collection Indexes (Shared with finlyzer.net frontend)
+            extractions = cls.db["extractions"]
+            await extractions.create_index("id", unique=True)
+            await extractions.create_index("job_id")
+            await extractions.create_index("user_email")
+            await extractions.create_index("document_type")
+            await extractions.create_index("status")
+            await extractions.create_index("created_at")
+
+            # Users Collection Indexes (Shared with finlyzer.net frontend)
+            users = cls.db["users"]
+            await users.create_index("email", unique=True)
 
             # Documents Collection Indexes
             docs = cls.db["documents"]
             await docs.create_index("document_id", unique=True)
             await docs.create_index("user_id")
+            await docs.create_index("user_email")
             await docs.create_index("document_type")
             await docs.create_index("created_at")
 

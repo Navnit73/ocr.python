@@ -27,6 +27,7 @@ class BatchService:
         language: str = "en",
         clean_with_ai: bool = True,
         owner_hash: Optional[str] = None,
+        user_email: Optional[str] = None,
         pipeline: Optional[ExtractionPipeline] = None,
     ) -> BatchExtractionResponse:
         """
@@ -37,6 +38,7 @@ class BatchService:
         start_time = time.perf_counter()
         batch_id = f"batch_{FileValidator.generate_or_sanitize_request_id()[4:]}"
         pipeline = pipeline or ExtractionPipeline()
+        normalized_email = (user_email or "guest").lower().strip()
 
         # 1. Unpack any .zip files into in-memory UploadFile objects
         unpacked_files: List[UploadFile] = []
@@ -91,6 +93,7 @@ class BatchService:
                         language=language,
                         clean_with_ai=clean_with_ai,
                         owner_hash=owner_hash,
+                        user_email=normalized_email,
                     )
                     dur_ms = int((time.perf_counter() - t0) * 1000)
                     return BatchItemResult(

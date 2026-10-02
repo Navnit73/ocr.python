@@ -104,13 +104,13 @@ class WorkerManager:
         logger.info("WorkerManager stopped.")
 
     @classmethod
-    async def submit_job(cls, job_id: str) -> None:
+    async def submit_job(cls, job_id: str, user_email: Optional[str] = None) -> None:
         """Submits a job to the background queue."""
         settings = get_settings()
         if settings.use_celery:
             try:
                 from app.workers.tasks import process_ocr_document_task
-                process_ocr_document_task.delay(job_id)
+                process_ocr_document_task.delay(job_id, user_email=user_email)
                 logger.info(f"Dispatched job {job_id} to Celery queue.")
                 return
             except Exception as e:
@@ -160,10 +160,13 @@ class WorkerManager:
                 await asyncio.sleep(1)
 
     @classmethod
-    async def process_job(cls, job_id: str) -> None:
+    async def process_job(cls, job_id: str, user_email: Optional[str] = None) -> None:
         """
         Executes a background OCR processing job from end to end.
         """
+        from app.db.repositories.extraction_repo import ExtractionRepository
+        from app.db.repositories.user_repo import UserRepository
+
         job = await JobRepository.get_job(job_id)
         if not job:
             logger.error(f"Cannot process job {job_id}: Job not found in MongoDB.")
@@ -179,6 +182,13 @@ class WorkerManager:
         callback_secret = job.get("callback_secret")
         file_ref = job.get("file_reference")
         owner_hash = job.get("user_id")
+        filename = job.get("metadata", {}).get("filename", "document.pdf")
+        effective_user_email = (
+            user_email
+            or job.get("user_email")
+            or job.get("metadata", {}).get("user_email")
+            or "guest"
+        ).lower().strip()
 
         try:
             # 1. Mark Job as Started
@@ -188,6 +198,7 @@ class WorkerManager:
             start_event_data = {
                 "job_id": job_id,
                 "document_id": doc_id,
+                "user_email": effective_user_email,
                 "status": "processing",
                 "current_stage": "ocr_extraction",
                 "progress": 5,
@@ -208,7 +219,12 @@ class WorkerManager:
                         status="processing",
                         progress=5,
                         current_stage="ocr_extraction",
-                        metadata={"total_pages": job.get("total_pages", 0)},
+                        metadata={
+                            "total_pages": job.get("total_pages", 0),
+                            "user_email": effective_user_email,
+                            "filename": filename,
+                        },
+                        user_email=effective_user_email,
                     )
                 )
 
@@ -216,7 +232,6 @@ class WorkerManager:
             if not file_ref:
                 raise ValueError("No file_reference found on job record.")
             file_bytes = await StorageService.read_file(file_ref)
-            filename = job.get("metadata", {}).get("filename", "document.pdf")
 
             # 3. Create Progress Callback for Live Updates
             async def _progress_callback(
@@ -237,6 +252,7 @@ class WorkerManager:
                 event_data = {
                     "job_id": job_id,
                     "document_id": doc_id,
+                    "user_email": effective_user_email,
                     "status": "processing",
                     "progress": progress_pct,
                     "total_pages": total_pages,
@@ -259,11 +275,14 @@ class WorkerManager:
                 password=job.get("password"),
                 owner_hash=owner_hash,
                 job_id=job_id,
+                user_email=effective_user_email,
                 progress_callback=_progress_callback,
             )
 
             # 5. Mark Job as Completed
+            actual_pages = result.metadata.pages
             meta_dict = result.metadata.model_dump()
+            meta_dict["user_email"] = effective_user_email
             await JobRepository.complete_job(
                 job_id=job_id,
                 result_dict=result.model_dump(),
@@ -277,10 +296,11 @@ class WorkerManager:
             completed_event_data = {
                 "job_id": job_id,
                 "document_id": doc_id,
+                "user_email": effective_user_email,
                 "status": "completed",
                 "progress": 100,
-                "total_pages": result.metadata.pages,
-                "processed_pages": result.metadata.pages,
+                "total_pages": actual_pages,
+                "processed_pages": actual_pages,
                 "current_stage": "completed",
                 "message": "Processing completed successfully",
                 "result_url": result_url,
@@ -290,6 +310,28 @@ class WorkerManager:
 
             # 6. Dispatch Webhook
             if callback_url:
+                webhook_metadata = {
+                    "user_email": effective_user_email,
+                    "filename": filename,
+                    "total_pages": actual_pages,
+                    "processed_pages": actual_pages,
+                    "processing_time_ms": result.metadata.processing_time_ms,
+                }
+                webhook_result = {
+                    "id": doc_id,
+                    "status": "success",
+                    "document_type": result.document_type,
+                    "extraction": result.extraction,
+                    "raw_text": result.raw_text,
+                    "cleaned_text": result.cleaned_text,
+                    "metadata": {
+                        "pages": actual_pages,
+                        "user_email": effective_user_email,
+                        "processing_time_ms": result.metadata.processing_time_ms,
+                        "ocr_engine": result.metadata.ocr_engine,
+                        "ai_cleaned": result.metadata.ai_cleaned,
+                    },
+                }
                 await WebhookService.dispatch_event(
                     event_name=WebhookEventEnum.JOB_COMPLETED.value,
                     job_id=job_id,
@@ -299,15 +341,13 @@ class WorkerManager:
                     status="completed",
                     progress=100,
                     current_stage="completed",
-                    metadata={
-                        "total_pages": result.metadata.pages,
-                        "processed_pages": result.metadata.pages,
-                        "processing_time_ms": result.metadata.processing_time_ms,
-                    },
+                    metadata=webhook_metadata,
+                    result=webhook_result,
                     result_url=result_url,
+                    user_email=effective_user_email,
                 )
 
-            logger.info(f"✅ Background job {job_id} completed successfully.")
+            logger.info(f"✅ Background job {job_id} completed successfully for user {effective_user_email}.")
 
         except Exception as e:
             error_msg = str(e)
@@ -320,15 +360,30 @@ class WorkerManager:
             if current_retries < settings.max_job_retries and not isinstance(e, ValueError):
                 new_count = await JobRepository.increment_retry(job_id)
                 logger.info(f"Retrying job {job_id} (Attempt #{new_count})...")
-                await cls.submit_job(job_id)
+                await cls.submit_job(job_id, user_email=effective_user_email)
                 return
 
             # Retries exhausted or non-retryable error
             await JobRepository.fail_job(job_id, error_message=error_msg)
 
+            # Record failure in extractions collection
+            try:
+                await ExtractionRepository.fail_extraction(
+                    document_id=doc_id,
+                    job_id=job_id,
+                    user_email=effective_user_email,
+                    error_message=error_msg,
+                    filename=filename,
+                    document_type=job.get("document_type", "general"),
+                    pages=job.get("total_pages", 1),
+                )
+            except Exception as ext_err:
+                logger.warning(f"Could not record failed extraction: {ext_err}")
+
             failed_event_data = {
                 "job_id": job_id,
                 "document_id": doc_id,
+                "user_email": effective_user_email,
                 "status": "failed",
                 "progress": 0,
                 "current_stage": "failed",
@@ -348,6 +403,13 @@ class WorkerManager:
                     progress=0,
                     current_stage="failed",
                     error=error_msg,
+                    metadata={
+                        "user_email": effective_user_email,
+                        "filename": filename,
+                        "total_pages": job.get("total_pages", 1),
+                        "error": error_msg,
+                    },
+                    user_email=effective_user_email,
                 )
 
     @classmethod

@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     # MongoDB Configuration
     mongodb_enabled: bool = Field(default=True, alias="MONGODB_ENABLED")
     mongodb_uri: str = Field(default="mongodb://localhost:27017", alias="MONGODB_URI")
-    mongodb_db_name: str = Field(default="ocr_advance", alias="MONGODB_DB_NAME")
+    mongodb_db_name: str = Field(default="finlyzer", alias="MONGODB_DB_NAME")
 
     # Redis & Celery Configuration
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")

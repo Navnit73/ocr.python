@@ -21,6 +21,7 @@ class WebhookPayload(BaseModel):
     event_id: str = Field(..., description="Unique event ID for deduplication/idempotency")
     job_id: str = Field(..., description="Unique job identifier")
     document_id: Optional[str] = Field(default=None, description="Document identifier")
+    user_email: Optional[str] = Field(default=None, description="User email associated with job")
     status: str = Field(..., description="Current job status: started, processing, completed, failed")
     progress: Optional[int] = Field(default=None, ge=0, le=100, description="Processing percentage")
     current_stage: Optional[str] = Field(default=None, description="Current processing stage")
@@ -29,9 +30,13 @@ class WebhookPayload(BaseModel):
         default=None,
         description="Authenticated URL to retrieve full extraction result without passing huge payloads",
     )
+    result: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Full extraction result payload including document_type, extraction, raw_text, cleaned_text, and metadata",
+    )
     metadata: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Execution statistics (e.g. total_pages, processed_pages, processing_time_ms)",
+        description="Execution statistics (e.g. total_pages, processed_pages, processing_time_ms, user_email)",
     )
     error: Optional[str] = Field(default=None, description="Error details if event is failed")
 

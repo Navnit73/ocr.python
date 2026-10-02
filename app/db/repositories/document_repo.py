@@ -24,21 +24,27 @@ class DocumentRepository:
     async def save_document(cls, doc_data: Dict[str, Any]) -> Dict[str, Any]:
         """Saves a document extraction record into MongoDB."""
         now = datetime.now(timezone.utc)
+        raw_email = doc_data.get("user_email") or doc_data.get("metadata", {}).get("user_email") or "guest"
+        user_email = raw_email.lower().strip()
+        metadata = dict(doc_data.get("metadata", {}))
+        metadata["user_email"] = user_email
+
         record = {
-            "document_id": doc_data["document_id"],
+            "document_id": doc_data.get("document_id") or doc_data.get("id"),
             "job_id": doc_data.get("job_id"),
             "user_id": doc_data.get("user_id"),
+            "user_email": user_email,
             "filename": doc_data.get("filename", "document.pdf"),
             "content_type": doc_data.get("content_type", "application/pdf"),
             "file_size_bytes": doc_data.get("file_size_bytes", 0),
             "document_type": doc_data.get("document_type", "general"),
             "status": doc_data.get("status", "success"),
-            "pages_count": doc_data.get("pages_count", 1),
+            "pages_count": doc_data.get("pages_count", doc_data.get("pages", 1) if isinstance(doc_data.get("pages"), int) else len(doc_data.get("pages", [])) or 1),
             "extraction": doc_data.get("extraction"),
             "raw_text": doc_data.get("raw_text", ""),
             "cleaned_text": doc_data.get("cleaned_text"),
             "pages": doc_data.get("pages", []),
-            "metadata": doc_data.get("metadata", {}),
+            "metadata": metadata,
             "warnings": doc_data.get("warnings", []),
             "created_at": doc_data.get("created_at", now),
             "updated_at": doc_data.get("updated_at", now),
@@ -51,6 +57,32 @@ class DocumentRepository:
             upsert=True,
         )
         logger.info(f"Saved document extraction record: {record['document_id']}")
+
+        # Also sync to shared extractions and users collections
+        try:
+            from app.db.repositories.extraction_repo import ExtractionRepository
+            from app.db.repositories.user_repo import UserRepository
+
+            await ExtractionRepository.save_extraction({
+                "id": record["document_id"],
+                "job_id": record["job_id"],
+                "user_email": user_email,
+                "document_type": record["document_type"],
+                "filename": record["filename"],
+                "pages": record["pages_count"],
+                "status": record["status"],
+                "extraction": record["extraction"],
+                "raw_text": record["raw_text"],
+                "cleaned_text": record["cleaned_text"],
+                "metadata": metadata,
+                "warnings": record["warnings"],
+            })
+
+            if record["status"] in ("success", "partial_success") and user_email != "guest":
+                await UserRepository.increment_pages_processed(user_email, record["pages_count"])
+        except Exception as e:
+            logger.warning(f"Secondary sync to extractions/users collection warning: {e}")
+
         return record
 
     @classmethod
@@ -63,6 +95,33 @@ class DocumentRepository:
         coll = cls._collection()
         doc = await coll.find_one({"document_id": document_id}, {"_id": 0})
         if not doc:
+            # Fallback to shared extractions collection
+            try:
+                from app.db.repositories.extraction_repo import ExtractionRepository
+                ext = await ExtractionRepository.get_extraction(document_id)
+                if ext:
+                    return {
+                        "document_id": ext.get("id"),
+                        "job_id": ext.get("job_id"),
+                        "user_id": owner_hash,
+                        "user_email": ext.get("user_email"),
+                        "filename": ext.get("filename", "document.pdf"),
+                        "content_type": "application/pdf",
+                        "file_size_bytes": 0,
+                        "document_type": ext.get("document_type", "general"),
+                        "status": ext.get("status", "success"),
+                        "pages_count": ext.get("pages", 1),
+                        "extraction": ext.get("extraction"),
+                        "raw_text": ext.get("raw_text", ""),
+                        "cleaned_text": ext.get("cleaned_text"),
+                        "pages": [],
+                        "metadata": ext.get("metadata", {}),
+                        "warnings": ext.get("warnings", []),
+                        "created_at": ext.get("created_at"),
+                        "updated_at": ext.get("updated_at"),
+                    }
+            except Exception:
+                pass
             return None
         if owner_hash and doc.get("user_id") and doc.get("user_id") != owner_hash:
             return None
@@ -143,4 +202,12 @@ class DocumentRepository:
         if owner_hash:
             query["user_id"] = owner_hash
         res = await coll.delete_one(query)
+
+        try:
+            db = MongoDBManager.get_db()
+            ext_query: Dict[str, Any] = {"$or": [{"id": document_id}, {"document_id": document_id}]}
+            await db["extractions"].delete_one(ext_query)
+        except Exception:
+            pass
+
         return res.deleted_count > 0

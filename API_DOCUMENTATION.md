@@ -95,6 +95,7 @@ Uploads a document (up to 200 pages / 100MB) for non-blocking asynchronous proce
 - `clean_with_ai` (Boolean, default: `true`): DeepSeek cleaning & structured entity extraction.
 - `request_id` (String, optional): Custom tracking document ID.
 - `password` (String, optional): Password for encrypted PDF files.
+- `user_email` (String, optional): Logged-in user's email address (for page quota credit tracking & MongoDB Vault sync).
 - `callback_url` (String, optional): Webhook URL to receive signed event notifications.
 - `callback_secret` (String, optional): Secret key for HMAC-SHA256 signature verification.
 
