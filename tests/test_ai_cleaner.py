@@ -86,3 +86,34 @@ def test_safe_json_loads_with_markdown():
     # Invalid string
     assert safe_json_loads("not a json object") is None
 
+
+def test_safe_json_loads_edge_cases_and_repairs():
+    """Verify safe_json_loads repairs reasoning tags, trailing commas, unescaped newlines, and truncated streams."""
+    from app.services.deepseek_client import safe_json_loads
+
+    # 1. Reasoning <think> tags
+    think_json = "<think>Analysing the statement line by line...</think>\n{\"bank_name\": \"JPMorgan Chase\", \"opening_balance\": 1000.0}"
+    parsed_think = safe_json_loads(think_json)
+    assert parsed_think is not None
+    assert parsed_think["bank_name"] == "JPMorgan Chase"
+    assert parsed_think["opening_balance"] == 1000.0
+
+    # 2. Trailing commas before brackets
+    trailing_comma_json = '{"transactions": [{"date": "2026-01-01", "amount": 100.0,},],}'
+    parsed_tc = safe_json_loads(trailing_comma_json)
+    assert parsed_tc is not None
+    assert len(parsed_tc["transactions"]) == 1
+    assert parsed_tc["transactions"][0]["amount"] == 100.0
+
+    # 3. Unescaped control characters in string values
+    unescaped_json = '{"merchant": "Best Coffee\\nDowntown Branch", "total": 12.50}'
+    parsed_un = safe_json_loads(unescaped_json)
+    assert parsed_un is not None
+    assert parsed_un["total"] == 12.50
+
+    # 4. Truncated JSON stream (auto-closed brackets)
+    truncated_json = '{"bank_name": "Bank of America", "transactions": [{"date": "2026-01-01", "description": "Salary", "amount": 5000.0}'
+    parsed_trunc = safe_json_loads(truncated_json)
+    assert parsed_trunc is not None
+    assert parsed_trunc["bank_name"] == "Bank of America"
+

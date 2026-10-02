@@ -88,13 +88,16 @@ class PDFService:
         start_page: int,
         end_page: int,
         password: Optional[str] = None,
-        dpi: int = 300,
+        dpi: Optional[int] = None,
         min_digital_chars_per_page: int = 30,
     ) -> List[PDFPageResult]:
         """
         Extracts digital text or renders images ONLY for a specific 1-indexed page range [start_page, end_page].
         Allows processing 10-page parts sequentially without exhausting memory on large documents.
         """
+        settings = get_settings()
+        effective_dpi = dpi or settings.pdf_render_dpi
+
         try:
             doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
         except Exception as e:
@@ -122,7 +125,7 @@ class PDFService:
         clamped_end = min(total_pages, end_page)
 
         page_results: List[PDFPageResult] = []
-        zoom = dpi / 72.0
+        zoom = effective_dpi / 72.0
         matrix = pymupdf.Matrix(zoom, zoom)
 
         try:
@@ -141,7 +144,7 @@ class PDFService:
                     )
                 else:
                     pix = page.get_pixmap(matrix=matrix, alpha=False)
-                    img_bytes = pix.tobytes("png")
+                    img_bytes = pix.tobytes("jpg")
                     del pix
                     page_results.append(
                         PDFPageResult(

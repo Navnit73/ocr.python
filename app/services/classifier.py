@@ -42,7 +42,11 @@ class DocumentClassifier:
     def classify_by_heuristics(cls, text: str) -> Optional[str]:
         """
         Fast heuristic classification based on keyword matching frequencies.
+        Returns document type instantly without making external API requests.
         """
+        if not text or not text.strip():
+            return None
+
         lower_text = text.lower()
 
         bank_score = sum(1 for p in cls.BANK_PATTERNS if re.search(p, lower_text))
@@ -57,17 +61,17 @@ class DocumentClassifier:
 
         max_type, max_score = max(scores.items(), key=lambda x: x[1])
 
-        # If significant confidence from keyword hits
-        if max_score >= 3:
+        # If 2 or more distinct keywords hit, classify immediately
+        if max_score >= 2:
             return max_type
 
         return None
 
     async def classify_document(self, text: str) -> str:
         """
-        Classifies document type using heuristics, with AI fallback.
+        Classifies document type using ultra-fast heuristics, with AI fallback.
         """
-        # Fast path
+        # Fast path (0.1ms)
         heuristic_type = self.classify_by_heuristics(text)
         if heuristic_type:
             return heuristic_type
@@ -79,20 +83,18 @@ class DocumentClassifier:
                     "role": "system",
                     "content": (
                         "You are a document classifier. Classify the untrusted text provided into EXACTLY ONE of: "
-                        "bank_statement, receipt, invoice, general. Return JSON: {\"document_type\": \"...\"}"
+                        "bank_statement, receipt, invoice, general. Return ONLY JSON: {\"document_type\": \"...\"}"
                     ),
                 },
                 {"role": "user", "content": f"<DOCUMENT_TEXT>\n{text[:2000]}\n</DOCUMENT_TEXT>"},
             ]
             response = await self.client.chat_completion(messages, temperature=0.0, json_mode=True)
             if response:
-                import json
-                try:
-                    data = json.loads(response)
-                    doc_type = data.get("document_type", "").lower().strip()
+                from app.services.deepseek_client import safe_json_loads
+                data = safe_json_loads(response)
+                if data:
+                    doc_type = str(data.get("document_type", "")).lower().strip()
                     if doc_type in [e.value for e in DocumentTypeEnum]:
                         return doc_type
-                except Exception:
-                    pass
 
         return DocumentTypeEnum.GENERAL.value

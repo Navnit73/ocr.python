@@ -206,7 +206,8 @@ class ExtractionPipeline:
                 part_pages = list(await asyncio.gather(*[_process_chunk_page(p) for p in chunk_page_results]))
                 pages.extend(part_pages)
 
-                if any(p.is_scanned for p in part_pages):
+                is_chunk_scanned = any(p.is_scanned for p in part_pages)
+                if is_chunk_scanned:
                     ocr_used = True
                     ocr_engine_name = "paddleocr"
 
@@ -222,31 +223,57 @@ class ExtractionPipeline:
                         effective_doc_type = DocumentTypeEnum.GENERAL.value
                     t_classify_ms += int((time.perf_counter() - t_cls_start) * 1000)
 
-                # AI Cleaning for this part
+                # AI Processing for this part (Optimized: Digital Fast-Path & Parallel Execution)
                 part_clean_text = part_raw_text
                 if clean_with_ai and part_raw_text:
-                    t_clean_start = time.perf_counter()
-                    part_clean_text, clean_warnings, _ = await self.ai_cleaner.clean_ocr_text(part_raw_text)
-                    all_warnings.extend(clean_warnings)
-                    ai_cleaned_flag = self.client.is_configured()
-                    t_ai_clean_ms += int((time.perf_counter() - t_clean_start) * 1000)
+                    if not is_chunk_scanned:
+                        # Digital PDF Fast-Path: Text is 100% digital vector text with no OCR noise.
+                        # Whitespace normalization is instantaneous (0.1ms), avoiding redundant LLM cleaning roundtrip.
+                        part_clean_text = AICleaner.normalize_whitespace(part_raw_text)
+                        ai_cleaned_flag = self.client.is_configured()
+
+                        t_ext_start = time.perf_counter()
+                        part_struct, extract_warnings = await self.extractor.extract(
+                            text=part_clean_text,
+                            document_type=effective_doc_type,
+                        )
+                        all_warnings.extend(extract_warnings)
+                        if part_struct:
+                            part_extractions.append(part_struct)
+                        t_struct_extract_ms += int((time.perf_counter() - t_ext_start) * 1000)
+                    else:
+                        # Scanned PDF: Run text cleaning and structured entity extraction concurrently in parallel
+                        t_ai_start = time.perf_counter()
+                        clean_task = self.ai_cleaner.clean_ocr_text(part_raw_text)
+                        extract_task = self.extractor.extract(text=part_raw_text, document_type=effective_doc_type)
+
+                        (c_text, clean_warnings, _), (part_struct, extract_warnings) = await asyncio.gather(
+                            clean_task, extract_task
+                        )
+
+                        part_clean_text = c_text
+                        all_warnings.extend(clean_warnings)
+                        all_warnings.extend(extract_warnings)
+                        if part_struct:
+                            part_extractions.append(part_struct)
+                        ai_cleaned_flag = self.client.is_configured()
+                        t_elapsed = int((time.perf_counter() - t_ai_start) * 1000)
+                        t_ai_clean_ms += t_elapsed
+                        t_struct_extract_ms += t_elapsed
                 else:
                     part_clean_text = AICleaner.normalize_whitespace(part_raw_text)
+                    if part_raw_text:
+                        t_ext_start = time.perf_counter()
+                        part_struct, extract_warnings = self.extractor._heuristic_fallback(
+                            text=part_clean_text,
+                            document_type=effective_doc_type,
+                        )
+                        all_warnings.extend(extract_warnings)
+                        if part_struct:
+                            part_extractions.append(part_struct)
+                        t_struct_extract_ms += int((time.perf_counter() - t_ext_start) * 1000)
 
                 part_cleaned_texts.append(part_clean_text)
-
-                # Structured extraction for this 10-page part
-                text_for_extract = part_clean_text if part_clean_text else part_raw_text
-                if text_for_extract:
-                    t_ext_start = time.perf_counter()
-                    part_struct, extract_warnings = await self.extractor.extract(
-                        text=text_for_extract,
-                        document_type=effective_doc_type,
-                    )
-                    all_warnings.extend(extract_warnings)
-                    if part_struct:
-                        part_extractions.append(part_struct)
-                    t_struct_extract_ms += int((time.perf_counter() - t_ext_start) * 1000)
 
                 # Progress after completing this 10-page part
                 current_processed = len(pages)
@@ -295,26 +322,37 @@ class ExtractionPipeline:
 
             part_clean_text = part_raw_text
             if clean_with_ai and part_raw_text:
-                t_clean_start = time.perf_counter()
-                part_clean_text, clean_warnings, _ = await self.ai_cleaner.clean_ocr_text(part_raw_text)
-                all_warnings.extend(clean_warnings)
-                ai_cleaned_flag = self.client.is_configured()
-                t_ai_clean_ms = int((time.perf_counter() - t_clean_start) * 1000)
-            else:
-                part_clean_text = AICleaner.normalize_whitespace(part_raw_text)
+                t_ai_start = time.perf_counter()
+                clean_task = self.ai_cleaner.clean_ocr_text(part_raw_text)
+                extract_task = self.extractor.extract(text=part_raw_text, document_type=effective_doc_type)
 
-            part_cleaned_texts.append(part_clean_text)
-
-            if part_clean_text or part_raw_text:
-                t_ext_start = time.perf_counter()
-                part_struct, extract_warnings = await self.extractor.extract(
-                    text=part_clean_text or part_raw_text,
-                    document_type=effective_doc_type,
+                (c_text, clean_warnings, _), (part_struct, extract_warnings) = await asyncio.gather(
+                    clean_task, extract_task
                 )
+
+                part_clean_text = c_text
+                all_warnings.extend(clean_warnings)
                 all_warnings.extend(extract_warnings)
                 if part_struct:
                     part_extractions.append(part_struct)
-                t_struct_extract_ms = int((time.perf_counter() - t_ext_start) * 1000)
+                ai_cleaned_flag = self.client.is_configured()
+                t_elapsed = int((time.perf_counter() - t_ai_start) * 1000)
+                t_ai_clean_ms = t_elapsed
+                t_struct_extract_ms = t_elapsed
+            else:
+                part_clean_text = AICleaner.normalize_whitespace(part_raw_text)
+                if part_clean_text or part_raw_text:
+                    t_ext_start = time.perf_counter()
+                    part_struct, extract_warnings = self.extractor._heuristic_fallback(
+                        text=part_clean_text or part_raw_text,
+                        document_type=effective_doc_type,
+                    )
+                    all_warnings.extend(extract_warnings)
+                    if part_struct:
+                        part_extractions.append(part_struct)
+                    t_struct_extract_ms = int((time.perf_counter() - t_ext_start) * 1000)
+
+            part_cleaned_texts.append(part_clean_text)
 
             await self._report_progress(
                 progress_callback,

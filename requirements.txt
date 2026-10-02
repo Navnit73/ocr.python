@@ -19,5 +19,6 @@ redis>=5.3.0
 celery>=5.4.0
 aiofiles>=24.1.0
 psutil>=7.0.0
+json-repair>=0.63.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0

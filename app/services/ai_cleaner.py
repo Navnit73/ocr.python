@@ -34,6 +34,7 @@ CLEANING RULES:
   "warnings": ["<warning if any portion is illegible or ambiguous>"],
   "review_required": false
 }
+8. CRITICAL OUTPUT FORMAT: Return ONLY the raw valid JSON object. No markdown fences, no thinking tags, no conversational preambles, and no trailing commas.
 """
 
 

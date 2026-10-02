@@ -48,6 +48,7 @@ CRITICAL RULES:
 2. NEVER modify, round, or alter monetary values.
 3. Preserve the exact order of transactions as they appear in the statement.
 4. If a date is ambiguous (e.g. 05/06/2026), format as best as possible and attach a note if needed.
+5. CRITICAL OUTPUT FORMAT: Return ONLY the raw valid JSON object. No markdown fences, no thinking tags, no conversational preambles, and no trailing commas.
 """
 
 RECEIPT_PROMPT = """You are a specialized receipt data extraction engine.
@@ -79,6 +80,7 @@ Extract structured receipt details strictly adhering to this JSON schema:
 CRITICAL RULES:
 1. Return null for missing fields.
 2. NEVER invent line items or modify numerical figures.
+3. CRITICAL OUTPUT FORMAT: Return ONLY the raw valid JSON object. No markdown fences, no thinking tags, no conversational preambles, and no trailing commas.
 """
 
 INVOICE_PROMPT = """You are a specialized invoice data extraction engine.
@@ -123,6 +125,7 @@ Extract structured invoice details strictly adhering to this JSON schema:
 CRITICAL RULES:
 1. Return null for missing fields.
 2. NEVER fabricate or alter numbers.
+3. CRITICAL OUTPUT FORMAT: Return ONLY the raw valid JSON object. No markdown fences, no thinking tags, no conversational preambles, and no trailing commas.
 """
 
 GENERAL_PROMPT = """You are a general document extraction engine.
@@ -136,6 +139,8 @@ Extract high-level structured data from the document adhering to:
   "key_value_pairs": { "key": "value" },
   "tables": [ [ ["cell1", "cell2"] ] ]
 }
+
+CRITICAL OUTPUT FORMAT: Return ONLY the raw valid JSON object. No markdown fences, no thinking tags, no conversational preambles, and no trailing commas.
 """
 
 
