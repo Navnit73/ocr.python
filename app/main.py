@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 
 from app.api.v1.router import router as api_v1_router
 from app.core.config import get_settings
+from app.db.mongodb import MongoDBManager
+from app.workers.worker_manager import WorkerManager
 
 # Configure Logging
 logging.basicConfig(
@@ -26,8 +28,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan events for startup and shutdown."""
     settings = get_settings()
     logger.info(f"🚀 Starting {settings.app_name} v{settings.version} in [{settings.environment}] mode...")
+
+    # Initialize MongoDB connection & indexes
+    await MongoDBManager.connect()
+
+    # Start Asynchronous Background Worker Manager & Job Recovery
+    await WorkerManager.start()
+
     yield
+
     logger.info(f"🛑 Shutting down {settings.app_name}...")
+    await WorkerManager.stop()
+    await MongoDBManager.disconnect()
+
     from app.services.deepseek_client import DeepSeekClient
     await DeepSeekClient.close_client()
 
@@ -40,10 +53,28 @@ def create_application() -> FastAPI:
         {
             "name": "OCR & Extraction",
             "description": (
-                "High-performance, stateless document OCR and 3-Layer structured data extraction. "
+                "High-performance document OCR and 3-Layer structured data extraction. "
                 "Supports PDFs up to **200 pages / 100MB**, scanned images, password-protected PDFs, "
                 "parallel batch extraction (up to 50 files / Zip archives), and asynchronous callback webhooks."
             ),
+        },
+        {
+            "name": "Asynchronous Jobs & Background Workers",
+            "description": (
+                "Asynchronous document processing lifecycle endpoints:\n"
+                "- `POST /api/v1/jobs/upload`: Non-blocking upload returning `HTTP 202 Accepted` immediately\n"
+                "- `GET /api/v1/jobs/{job_id}`: Real-time progress and processing stage tracking\n"
+                "- `GET /api/v1/jobs/{job_id}/events`: Server-Sent Events (SSE) live push stream\n"
+                "- `POST /api/v1/jobs/{job_id}/cancel` & `/retry`: Interactive job control."
+            ),
+        },
+        {
+            "name": "Stored Documents & Extractions",
+            "description": "Query, search, filter, and delete persistent document extractions in MongoDB.",
+        },
+        {
+            "name": "Admin Dashboard & System Monitoring",
+            "description": "Real database metrics, worker CPU/memory health, and global system event stream.",
         },
         {
             "name": "Export & Accounting Downloads",
@@ -66,16 +97,15 @@ def create_application() -> FastAPI:
         version=settings.version,
         description=(
             "### 🚀 Enterprise AI-Powered Document OCR & Financial Intelligence API\n\n"
-            "An ultra-fast, stateless REST API to extract, clean, structure, and export documents:\n\n"
-            "- **Authentication**: Use `X-API-Key` header or `Authorization: Bearer <key>` (click **Authorize** above)\n"
+            "An ultra-fast, production-grade REST API to extract, clean, structure, and export documents:\n\n"
+            "- **Asynchronous Processing**: Upload large **100–200 page documents**, get immediate `202 Accepted`, and track progress via SSE or Webhooks\n"
+            "- **Background Workers**: Dedicated background worker pool with Celery & Redis support, crash recovery, and concurrency management\n"
+            "- **Real-Time Notifications**: Server-Sent Events (SSE) `/api/v1/jobs/{job_id}/events` & Signed HMAC-SHA256 Webhooks\n"
+            "- **Persistent Storage**: MongoDB persistence for extractions, jobs, and webhook logs with in-memory caching fallback\n"
+            "- **Admin Dashboard**: Live system analytics, page metrics, duration tracking, and worker health monitoring\n"
+            "- **Authentication**: Use `X-API-Key` header or `Authorization: Bearer <key>`\n"
             "- **Rate Limiting**: Protected with in-memory sliding window limiter\n"
-            "- **Supported Documents**: Bank Statements, Invoices, Receipts, Tax Docs, General PDFs & Scanned Images\n"
-            "- **Capacity**: Up to **200 pages** per PDF and up to **100MB** payload size\n"
-            "- **3-Layer Output**: Layer 1 (Raw OCR), Layer 2 (Prompt-Injection-Safe Cleaned Text), Layer 3 (Pydantic-Validated Structured JSON)\n"
-            "- **Financial Integrity**: Mathematical balance audits and tax validation preserving raw source figures\n"
-            "- **Accounting Direct Exports**: Direct `.ofx`, `.qbo` (QuickBooks), `.qif`, `.xlsx`, `.pdf`, and `.csv` generation\n"
-            "- **Batch & Webhooks**: Parallel multi-file/Zip processing and signed async webhooks (`callback_url`)\n"
-            "- **Stateless**: No MongoDB, Redis, or Celery required. In-memory TTL caching with guaranteed temporary file cleanup."
+            "- **Accounting Direct Exports**: Direct `.ofx`, `.qbo` (QuickBooks), `.qif`, `.xlsx`, `.pdf`, and `.csv` generation."
         ),
         openapi_tags=tags_metadata,
         docs_url="/docs" if settings.enable_docs else None,

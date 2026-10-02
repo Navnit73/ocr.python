@@ -1,14 +1,17 @@
 """
-OCR & Extraction API Endpoints with API Key Authentication, Rate Limiting, Batch & Async Webhooks.
+OCR & Extraction API Endpoints with API Key Authentication, Rate Limiting, Async Background Workers & Batch.
 """
 
 from typing import List, Optional, Union
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, Request, Response, UploadFile, status
+import uuid
+from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, UploadFile, status
 from pydantic import BaseModel
 
 from app.core.rate_limiter import check_rate_limit
 from app.core.security import AuthenticatedClient, verify_api_key
+from app.db.repositories.job_repo import JobRepository
 from app.schemas.batch import BatchExtractionResponse
+from app.schemas.job import JobCreateResponse
 from app.schemas.ocr import (
     DocumentTypeEnum,
     ExtractionResponse,
@@ -17,17 +20,21 @@ from app.schemas.ocr import (
 from app.services.batch_service import BatchService
 from app.services.file_validator import FileValidator
 from app.services.pipeline import ExtractionPipeline
-from app.services.webhook_service import WebhookService
+from app.services.storage_service import StorageService
+from app.workers.worker_manager import WorkerManager
 
 router = APIRouter(prefix="/ocr", tags=["OCR & Extraction"])
 
 
 class AsyncAcceptedResponse(BaseModel):
-    """Returned when an asynchronous callback_url is supplied."""
-    id: str
-    status: str = "processing"
+    """Returned when an asynchronous callback_url or async_mode is requested."""
+    job_id: str
+    document_id: str
+    id: str  # Backward compatibility alias
+    status: str = "queued"
     message: str
-    callback_url: str
+    status_url: str
+    callback_url: Optional[str] = None
 
 
 def get_pipeline() -> ExtractionPipeline:
@@ -35,60 +42,19 @@ def get_pipeline() -> ExtractionPipeline:
     return ExtractionPipeline()
 
 
-async def _run_async_extraction_and_webhook(
-    pipeline: ExtractionPipeline,
-    file_bytes: bytes,
-    filename: str,
-    content_type: str,
-    document_type: str,
-    language: str,
-    clean_with_ai: bool,
-    client_request_id: str,
-    password: Optional[str],
-    owner_hash: Optional[str],
-    callback_url: str,
-    callback_secret: Optional[str],
-):
-    """Background task worker that executes extraction and fires webhook."""
-    import io
-    file_obj = UploadFile(
-        filename=filename,
-        file=io.BytesIO(file_bytes),
-        headers={"content-type": content_type},
-    )
-    res = await pipeline.process_document(
-        file=file_obj,
-        document_type=document_type,
-        language=language,
-        clean_with_ai=clean_with_ai,
-        client_request_id=client_request_id,
-        password=password,
-        owner_hash=owner_hash,
-    )
-    await WebhookService.send_webhook(
-        callback_url=callback_url,
-        payload=res.model_dump(),
-        secret=callback_secret,
-    )
-
-
 @router.post(
-    "/extract",
-    response_model=Union[ExtractionResponse, AsyncAcceptedResponse],
-    status_code=status.HTTP_200_OK,
-    summary="Extract text and structured data from documents (Up to 200 Pages)",
+    "/extract-async",
+    response_model=JobCreateResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Upload document and queue asynchronous OCR extraction (HTTP 202 Accepted)",
     description=(
-        "Upload a bank statement, receipt, invoice, general document, PDF, or image (up to 200 pages / 100MB). "
-        "Extracts OCR text, cleans it with DeepSeek AI, identifies document type, "
-        "and returns structured 3-layer JSON (raw OCR, cleaned text, structured extraction).\n\n"
-        "**Authentication**: Requires valid `X-API-Key` or `Authorization: Bearer <key>`.\n"
-        "**Async Mode**: If `callback_url` is provided, returns `202 Accepted` immediately and posts final extraction to your webhook."
+        "Upload a document (up to 200 pages / 100MB) for asynchronous background processing.\n\n"
+        "Immediately returns HTTP `202 Accepted` with a `job_id`, `document_id`, and `status_url`.\n"
+        "The background worker picks up the job and executes OCR, AI cleaning, and structured extraction independently."
     ),
     dependencies=[Depends(check_rate_limit)],
 )
-async def extract_document(
-    background_tasks: BackgroundTasks,
-    response: Response,
+async def extract_document_async(
     file: UploadFile = File(..., description="Document file: PDF (up to 200 pages), JPG, PNG, WEBP, or TIFF"),
     document_type: DocumentTypeEnum = Form(
         default=DocumentTypeEnum.AUTO,
@@ -104,6 +70,118 @@ async def extract_document(
     ),
     request_id: Optional[str] = Form(
         default=None,
+        description="Optional unique document ID from frontend",
+    ),
+    password: Optional[str] = Form(
+        default=None,
+        description="Optional password for password-protected PDF documents",
+    ),
+    callback_url: Optional[str] = Form(
+        default=None,
+        description="Optional webhook URL to receive event notifications upon completion",
+    ),
+    callback_secret: Optional[str] = Form(
+        default=None,
+        description="Optional secret key for HMAC-SHA256 signature header (X-Webhook-Signature) on callback POST",
+    ),
+    x_request_id: Optional[str] = Header(
+        default=None,
+        alias="X-Request-ID",
+        description="Optional custom request ID via HTTP Header",
+    ),
+    auth_client: AuthenticatedClient = Depends(verify_api_key),
+) -> JobCreateResponse:
+    """
+    Asynchronous upload endpoint: saves document to persistent storage, creates job record, and enqueues worker.
+    """
+    effective_doc_id = FileValidator.generate_or_sanitize_request_id(request_id or x_request_id)
+    job_id = f"job_{uuid.uuid4().hex[:12]}"
+    filename = file.filename or "document.pdf"
+
+    # Validate
+    doc_category, file_bytes = await FileValidator.validate_upload(file)
+
+    # Save to storage
+    file_ref, checksum, file_size = await StorageService.save_file(
+        file_bytes=file_bytes,
+        filename=filename,
+        document_id=effective_doc_id,
+    )
+
+    # Create job in MongoDB
+    job_doc = {
+        "job_id": job_id,
+        "document_id": effective_doc_id,
+        "user_id": auth_client.key_hash,
+        "status": "queued",
+        "progress": 0,
+        "total_pages": 1,
+        "processed_pages": 0,
+        "current_stage": "queued",
+        "message": "Document uploaded successfully. Processing has started.",
+        "file_reference": file_ref,
+        "callback_url": callback_url,
+        "callback_secret": callback_secret,
+        "document_type": document_type.value,
+        "language": language.value,
+        "clean_with_ai": clean_with_ai,
+        "password": password,
+        "metadata": {
+            "filename": filename,
+            "content_type": file.content_type,
+            "file_size_bytes": file_size,
+            "checksum_sha256": checksum,
+            "doc_category": doc_category,
+        },
+    }
+    await JobRepository.create_job(job_doc)
+
+    # Submit to worker queue
+    await WorkerManager.submit_job(job_id)
+
+    return JobCreateResponse(
+        job_id=job_id,
+        document_id=effective_doc_id,
+        status="queued",
+        message="Document uploaded successfully. Processing has started.",
+        status_url=f"/api/v1/jobs/{job_id}",
+    )
+
+
+@router.post(
+    "/extract",
+    response_model=Union[ExtractionResponse, AsyncAcceptedResponse],
+    status_code=status.HTTP_200_OK,
+    summary="Extract text and structured data from documents (Up to 200 Pages)",
+    description=(
+        "Upload a bank statement, receipt, invoice, general document, PDF, or image (up to 200 pages / 100MB).\n\n"
+        "**Synchronous Mode** (Default): Waits for processing and returns 3-layer JSON.\n"
+        "**Async Mode**: If `async_mode=true` or `callback_url` is provided, returns HTTP `202 Accepted` immediately.\n"
+        "**Authentication**: Requires valid `X-API-Key` or `Authorization: Bearer <key>`."
+    ),
+    dependencies=[Depends(check_rate_limit)],
+)
+async def extract_document(
+    response: Response,
+    file: UploadFile = File(..., description="Document file: PDF (up to 200 pages), JPG, PNG, WEBP, or TIFF"),
+    document_type: DocumentTypeEnum = Form(
+        default=DocumentTypeEnum.AUTO,
+        description="Target document type (auto, bank_statement, receipt, invoice, general)",
+    ),
+    language: LanguageEnum = Form(
+        default=LanguageEnum.EN,
+        description="OCR language hint (auto, en, hi, es, fr, de, ch)",
+    ),
+    clean_with_ai: bool = Form(
+        default=True,
+        description="Whether to clean OCR text and extract structured entities using DeepSeek",
+    ),
+    async_mode: bool = Form(
+        default=False,
+        description="Whether to execute asynchronously via background workers (returns 202 Accepted)",
+    ),
+    request_id: Optional[str] = Form(
+        default=None,
         description="Optional unique request ID from frontend. Returned in response.",
     ),
     password: Optional[str] = Form(
@@ -112,7 +190,7 @@ async def extract_document(
     ),
     callback_url: Optional[str] = Form(
         default=None,
-        description="Optional webhook URL. If provided, extraction runs in background and results are POSTed here.",
+        description="Optional webhook URL. If provided, extraction runs asynchronously in background.",
     ),
     callback_secret: Optional[str] = Form(
         default=None,
@@ -127,37 +205,60 @@ async def extract_document(
     pipeline: ExtractionPipeline = Depends(get_pipeline),
 ) -> Union[ExtractionResponse, AsyncAcceptedResponse]:
     """
-    Extracts text and structured financial entities from uploaded documents.
+    Extracts text and structured entities. Automatically supports both synchronous and asynchronous workflows.
     """
     effective_request_id = FileValidator.generate_or_sanitize_request_id(request_id or x_request_id)
 
-    # If callback_url provided, schedule background task and return 202 Accepted immediately
-    if callback_url:
-        file_bytes = await file.read()
+    # If async_mode requested or callback_url provided, route to background worker
+    if async_mode or callback_url:
+        job_id = f"job_{uuid.uuid4().hex[:12]}"
         filename = file.filename or "document.pdf"
-        content_type = file.content_type or "application/pdf"
+        doc_category, file_bytes = await FileValidator.validate_upload(file)
 
-        background_tasks.add_task(
-            _run_async_extraction_and_webhook,
-            pipeline=pipeline,
+        file_ref, checksum, file_size = await StorageService.save_file(
             file_bytes=file_bytes,
             filename=filename,
-            content_type=content_type,
-            document_type=document_type.value,
-            language=language.value,
-            clean_with_ai=clean_with_ai,
-            client_request_id=effective_request_id,
-            password=password,
-            owner_hash=auth_client.key_hash,
-            callback_url=callback_url,
-            callback_secret=callback_secret,
+            document_id=effective_request_id,
         )
+
+        job_doc = {
+            "job_id": job_id,
+            "document_id": effective_request_id,
+            "user_id": auth_client.key_hash,
+            "status": "queued",
+            "progress": 0,
+            "total_pages": 1,
+            "processed_pages": 0,
+            "current_stage": "queued",
+            "message": "Document uploaded successfully. Processing has started.",
+            "file_reference": file_ref,
+            "callback_url": callback_url,
+            "callback_secret": callback_secret,
+            "document_type": document_type.value,
+            "language": language.value,
+            "clean_with_ai": clean_with_ai,
+            "password": password,
+            "metadata": {
+                "filename": filename,
+                "content_type": file.content_type,
+                "file_size_bytes": file_size,
+                "checksum_sha256": checksum,
+                "doc_category": doc_category,
+            },
+        }
+        await JobRepository.create_job(job_doc)
+        await WorkerManager.submit_job(job_id)
 
         response.status_code = status.HTTP_202_ACCEPTED
         return AsyncAcceptedResponse(
+            job_id=job_id,
+            document_id=effective_request_id,
             id=effective_request_id,
-            status="processing",
-            message="Document extraction queued. Results will be delivered to callback_url upon completion.",
+            status="processing" if callback_url else "queued",
+            message="Document extraction queued. Results will be delivered to callback_url upon completion."
+            if callback_url
+            else "Document uploaded successfully. Processing has started.",
+            status_url=f"/api/v1/jobs/{job_id}",
             callback_url=callback_url,
         )
 

@@ -89,3 +89,62 @@ async def verify_api_key(
         key_hash=hash_key(provided_key),
         client_ip=client_ip,
     )
+
+
+async def verify_admin_key(
+    request: Request,
+    header_api_key: Optional[str] = Security(api_key_header_scheme),
+    bearer_credentials: Optional[HTTPAuthorizationCredentials] = Security(http_bearer_scheme),
+    custom_x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+) -> AuthenticatedClient:
+    """
+    Validates that the provided API key belongs to the authorized admin keys list.
+    Throws 403 Forbidden if the key is valid as normal API key but not admin, or 401 if invalid.
+    """
+    settings = get_settings()
+
+    provided_key: Optional[str] = None
+    if header_api_key and header_api_key.strip():
+        provided_key = header_api_key.strip()
+    elif bearer_credentials and bearer_credentials.credentials.strip():
+        provided_key = bearer_credentials.credentials.strip()
+    elif custom_x_api_key and custom_x_api_key.strip():
+        provided_key = custom_x_api_key.strip()
+
+    if not provided_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Admin API Key. Provide a valid admin key in 'X-API-Key' header.",
+            headers={"WWW-Authenticate": "ApiKey, Bearer"},
+        )
+
+    # Check against admin API keys
+    is_admin = False
+    for admin_key in settings.admin_api_keys:
+        if secrets.compare_digest(provided_key, admin_key.strip()):
+            is_admin = True
+            break
+
+    if not is_admin:
+        # Check if it's at least a valid user key to provide a 403 Forbidden instead of 401
+        is_user = any(secrets.compare_digest(provided_key, k.strip()) for k in settings.api_keys)
+        if is_user:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin privileges required to access this resource.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Admin API Key.",
+            headers={"WWW-Authenticate": "ApiKey, Bearer"},
+        )
+
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    masked = f"{provided_key[:4]}...{provided_key[-4:]}" if len(provided_key) >= 8 else "***"
+
+    return AuthenticatedClient(
+        api_key_masked=masked,
+        key_hash=hash_key(provided_key),
+        client_ip=client_ip,
+    )
+

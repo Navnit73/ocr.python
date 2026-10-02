@@ -3,7 +3,7 @@ Application Configuration with Pydantic Settings.
 """
 
 from functools import lru_cache
-from typing import List, Union
+from typing import List, Optional, Union
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -63,6 +63,32 @@ class Settings(BaseSettings):
     rate_limit_requests_per_minute: int = Field(default=60, alias="RATE_LIMIT_REQUESTS_PER_MINUTE")
     rate_limit_burst: int = Field(default=15, alias="RATE_LIMIT_BURST")
 
+    # MongoDB Configuration
+    mongodb_enabled: bool = Field(default=True, alias="MONGODB_ENABLED")
+    mongodb_uri: str = Field(default="mongodb://localhost:27017", alias="MONGODB_URI")
+    mongodb_db_name: str = Field(default="ocr_advance", alias="MONGODB_DB_NAME")
+
+    # Redis & Celery Configuration
+    redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
+    celery_broker_url: Optional[str] = Field(default=None, alias="CELERY_BROKER_URL")
+    celery_result_backend: Optional[str] = Field(default=None, alias="CELERY_RESULT_BACKEND")
+    use_celery: bool = Field(default=False, alias="USE_CELERY")
+
+    # Worker & Concurrency Configuration
+    worker_concurrency: int = Field(default=4, alias="WORKER_CONCURRENCY")
+    max_job_retries: int = Field(default=3, alias="MAX_JOB_RETRIES")
+    job_stale_timeout_seconds: int = Field(default=600, alias="JOB_STALE_TIMEOUT_SECONDS")
+
+    # Storage Configuration
+    storage_dir: str = Field(default="./storage/uploads", alias="STORAGE_DIR")
+    storage_retention_days: int = Field(default=7, alias="STORAGE_RETENTION_DAYS")
+
+    # Admin Dashboard Configuration
+    admin_api_keys: Union[str, List[str]] = Field(
+        default=["ocr_test_key_master", "ocr_admin_secret_2026"],
+        alias="ADMIN_API_KEYS",
+    )
+
     # Allowed Extensions & MIME Types
     allowed_extensions: List[str] = [
         ".pdf",
@@ -83,7 +109,7 @@ class Settings(BaseSettings):
         "image/tiff",
     ]
 
-    @field_validator("api_keys", mode="before")
+    @field_validator("api_keys", "admin_api_keys", mode="before")
     @classmethod
     def parse_api_keys(cls, value: Union[str, List[str]]) -> List[str]:
         if isinstance(value, str):

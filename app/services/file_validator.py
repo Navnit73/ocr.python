@@ -82,6 +82,28 @@ class FileValidator:
         doc_category = cls._verify_signature(content, ext)
         return doc_category, content
 
+    @classmethod
+    def detect_category_from_bytes(cls, content: bytes, filename: str) -> str:
+        """Detects whether bytes represent a PDF or image based on signature and filename."""
+        _, ext = os.path.splitext(filename.lower())
+        return cls._verify_signature(content, ext)
+
+    @classmethod
+    def validate_bytes_and_size(cls, content: bytes, filename: str) -> None:
+        """Validates raw bytes length against max upload size."""
+        settings = get_settings()
+        max_bytes = settings.max_upload_size_mb * 1024 * 1024
+        if len(content) > max_bytes:
+            raise HTTPException(
+                status_code=getattr(status, "HTTP_413_CONTENT_TOO_LARGE", 413),
+                detail=f"File size ({len(content) / (1024*1024):.2f}MB) exceeds maximum limit of {settings.max_upload_size_mb}MB.",
+            )
+        if len(content) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uploaded file is empty (0 bytes).",
+            )
+
     @staticmethod
     def _verify_signature(content: bytes, ext: str) -> str:
         """
