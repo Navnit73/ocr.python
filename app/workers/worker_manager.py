@@ -36,21 +36,36 @@ class WorkerManager:
 
     @classmethod
     def _get_queue(cls) -> asyncio.Queue:
-        if cls._queue is None:
+        current_loop = None
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
+        if cls._queue is None or (current_loop and getattr(cls._queue, "_loop", None) not in (None, current_loop)):
             cls._queue = asyncio.Queue()
         return cls._queue
 
     @classmethod
     def _get_lock(cls) -> asyncio.Lock:
-        if cls._lock is None:
+        current_loop = None
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
+        if cls._lock is None or (current_loop and getattr(cls._lock, "_loop", None) not in (None, current_loop)):
             cls._lock = asyncio.Lock()
         return cls._lock
 
     @classmethod
     async def start(cls) -> None:
         """Starts the background worker pool and runs crash recovery for stale jobs."""
+        current_loop = asyncio.get_running_loop()
         if cls._initialized and cls._workers:
-            return
+            # Check if existing workers are still running on current loop
+            if all(not w.done() and getattr(w, "get_loop", lambda: None)() == current_loop for w in cls._workers):
+                return
 
         settings = get_settings()
         cls._queue = asyncio.Queue()
@@ -101,8 +116,14 @@ class WorkerManager:
             except Exception as e:
                 logger.warning(f"Could not dispatch to Celery ({e}), falling back to internal worker queue.")
 
-        # Ensure manager is started
-        if not cls._initialized or not cls._workers:
+        # Ensure manager is started on active loop
+        current_loop = asyncio.get_running_loop()
+        needs_restart = (
+            not cls._initialized
+            or not cls._workers
+            or any(w.done() or getattr(w, "get_loop", lambda: None)() != current_loop for w in cls._workers)
+        )
+        if needs_restart:
             await cls.start()
 
         queue = cls._get_queue()

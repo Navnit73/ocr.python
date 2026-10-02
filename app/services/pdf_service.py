@@ -26,20 +26,17 @@ class PDFPageResult:
 
 
 class PDFService:
-    """Handles PDF inspection, digital text extraction, and page rendering for OCR."""
+    """Handles PDF inspection, digital text extraction, and page rendering for OCR in 10-page chunked parts."""
 
     @classmethod
-    def process_pdf(
+    def get_pdf_page_count(
         cls,
         pdf_bytes: bytes,
         password: Optional[str] = None,
-        dpi: int = 300,
-        min_digital_chars_per_page: int = 30,
-    ) -> Tuple[List[PDFPageResult], int]:
+    ) -> int:
         """
-        Parses PDF document. Extracts embedded digital text directly, or renders
-        scanned pages to high-resolution image bytes for downstream OCR.
-        Handles password-protected / encrypted PDFs safely.
+        Quickly inspects PDF document and returns total page count.
+        Validates encryption and enforces max_pdf_pages limit.
         """
         settings = get_settings()
 
@@ -68,31 +65,72 @@ class PDFService:
                 )
 
         total_pages = len(doc)
+        doc.close()
+
         if total_pages == 0:
-            doc.close()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="PDF document contains 0 pages."
             )
 
         if total_pages > settings.max_pdf_pages:
-            doc.close()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"PDF page count ({total_pages}) exceeds maximum allowed limit of {settings.max_pdf_pages} pages."
             )
 
+        return total_pages
+
+    @classmethod
+    def process_pdf_chunk(
+        cls,
+        pdf_bytes: bytes,
+        start_page: int,
+        end_page: int,
+        password: Optional[str] = None,
+        dpi: int = 300,
+        min_digital_chars_per_page: int = 30,
+    ) -> List[PDFPageResult]:
+        """
+        Extracts digital text or renders images ONLY for a specific 1-indexed page range [start_page, end_page].
+        Allows processing 10-page parts sequentially without exhausting memory on large documents.
+        """
+        try:
+            doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to parse PDF document: {str(e)}"
+            )
+
+        if doc.is_encrypted or doc.needs_pass:
+            if not password:
+                doc.close()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="PDF is password-protected. Please provide the 'password' parameter."
+                )
+            if not doc.authenticate(password):
+                doc.close()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="PDF authentication failed: Incorrect password provided."
+                )
+
+        total_pages = len(doc)
+        clamped_start = max(1, start_page)
+        clamped_end = min(total_pages, end_page)
+
         page_results: List[PDFPageResult] = []
-        zoom = dpi / 72.0  # 72 points per inch default PDF coordinate system
+        zoom = dpi / 72.0
         matrix = pymupdf.Matrix(zoom, zoom)
 
         try:
-            for i, page in enumerate(doc):
+            for i in range(clamped_start - 1, clamped_end):
+                page = doc[i]
                 page_num = i + 1
-                # Try extracting embedded digital text
                 embedded_text = page.get_text("text").strip()
 
-                # If the page contains substantial embedded text, use it directly (fast path)
                 if len(embedded_text) >= min_digital_chars_per_page:
                     page_results.append(
                         PDFPageResult(
@@ -102,18 +140,42 @@ class PDFService:
                         )
                     )
                 else:
-                    # Render page to high-res pixmap for OCR
                     pix = page.get_pixmap(matrix=matrix, alpha=False)
                     img_bytes = pix.tobytes("png")
+                    del pix
                     page_results.append(
                         PDFPageResult(
                             page_number=page_num,
                             is_scanned=True,
-                            text=embedded_text,  # Keep any partial text
+                            text=embedded_text,
                             image_bytes=img_bytes,
                         )
                     )
         finally:
             doc.close()
 
+        return page_results
+
+    @classmethod
+    def process_pdf(
+        cls,
+        pdf_bytes: bytes,
+        password: Optional[str] = None,
+        dpi: int = 300,
+        min_digital_chars_per_page: int = 30,
+    ) -> Tuple[List[PDFPageResult], int]:
+        """
+        Parses PDF document. Extracts embedded digital text directly, or renders
+        scanned pages to high-resolution image bytes for downstream OCR.
+        Handles password-protected / encrypted PDFs safely.
+        """
+        total_pages = cls.get_pdf_page_count(pdf_bytes, password=password)
+        page_results = cls.process_pdf_chunk(
+            pdf_bytes=pdf_bytes,
+            start_page=1,
+            end_page=total_pages,
+            password=password,
+            dpi=dpi,
+            min_digital_chars_per_page=min_digital_chars_per_page,
+        )
         return page_results, total_pages

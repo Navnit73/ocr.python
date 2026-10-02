@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app.core.rate_limiter import check_rate_limit
 from app.core.security import AuthenticatedClient, verify_api_key
+from app.db.repositories.document_repo import DocumentRepository
 from app.schemas.batch import ConsolidationRequest, ConsolidationResponse
 from app.schemas.export import DirectExportRequest, ExportFormatEnum
 from app.services.consolidation_service import ConsolidationService
@@ -60,27 +61,35 @@ async def download_by_id(
     Retrieves cached document extraction by ID and generates the selected file format.
     Enforces owner-key matching to eliminate IDOR / BOLA vulnerabilities.
     """
+    doc_type = "general"
+    extraction = {}
+    raw_text = ""
+
     entry = ResultCache.get_with_owner(id)
-    if not entry:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=(
-                f"Extraction result with ID '{id}' was not found or has expired from temporary memory. "
-                "You can re-upload the document or use POST /api/v1/export/generate with the extraction payload."
-            ),
-        )
-
-    owner_hash, cached = entry
-    # Enforce ownership: reject if document was created by another API key
-    if owner_hash and owner_hash != auth_client.key_hash:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access denied: Document '{id}' belongs to another account.",
-        )
-
-    doc_type = cached.get("document_type", "general")
-    extraction = cached.get("extraction", {})
-    raw_text = cached.get("raw_text", "")
+    if entry:
+        owner_hash, cached = entry
+        if owner_hash and owner_hash != auth_client.key_hash:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied: Document '{id}' belongs to another account.",
+            )
+        doc_type = cached.get("document_type", "general")
+        extraction = cached.get("extraction", {})
+        raw_text = cached.get("raw_text", "")
+    else:
+        # Check persistent MongoDB storage
+        doc = await DocumentRepository.get_document(id, owner_hash=auth_client.key_hash)
+        if not doc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"Extraction result with ID '{id}' was not found or has expired. "
+                    "You can re-upload the document or use POST /api/v1/export/generate with the extraction payload."
+                ),
+            )
+        doc_type = doc.get("document_type", "general")
+        extraction = doc.get("extraction", {})
+        raw_text = doc.get("raw_text", "")
 
     file_bytes, media_type, filename = ExportService.generate_export(
         doc_id=id,
@@ -173,7 +182,7 @@ async def consolidate_statements(
     """
     extractions = []
 
-    # Gather extractions from cache IDs if provided, verifying caller ownership
+    # Gather extractions from cache IDs or database, verifying caller ownership
     if payload.request_ids:
         for rid in payload.request_ids:
             entry = ResultCache.get_with_owner(rid)
@@ -186,6 +195,10 @@ async def consolidate_statements(
                     )
                 if cached.get("extraction"):
                     extractions.append(cached["extraction"])
+            else:
+                doc = await DocumentRepository.get_document(rid, owner_hash=auth_client.key_hash)
+                if doc and doc.get("extraction"):
+                    extractions.append(doc["extraction"])
 
     # Gather direct extractions if provided
     if payload.extractions:

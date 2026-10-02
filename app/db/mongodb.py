@@ -24,6 +24,11 @@ class MongoDBManager:
     _initialized: bool = False
 
     @classmethod
+    def is_connected(cls) -> bool:
+        """Returns True if MongoDB or Mock database is active."""
+        return cls.db is not None
+
+    @classmethod
     async def connect(cls, force_mock: bool = False) -> None:
         """Initializes database connection with auto-fallback to mock if offline."""
         if cls._initialized and cls.db is not None:

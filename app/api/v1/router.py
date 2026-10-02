@@ -18,8 +18,21 @@ router = APIRouter()
 @router.get("/health", tags=["Health"], summary="API v1 Health Check")
 async def health_check():
     """Health check endpoint."""
+    from app.core.config import get_settings
+    from app.db.mongodb import MongoDBManager
+    from app.workers.worker_manager import WorkerManager
+
+    settings = get_settings()
+    db_connected = MongoDBManager.is_connected()
+    worker_health = WorkerManager.get_health_stats()
+
     return {
         "status": "healthy",
+        "app_name": settings.app_name,
+        "version": settings.version,
+        "environment": settings.environment,
+        "database": "connected" if db_connected else "disconnected",
+        "worker_status": "active" if worker_health.get("is_alive") else "idle",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "api_version": "v1",
     }

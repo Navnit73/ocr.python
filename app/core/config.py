@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     # Document & OCR Configuration
     max_upload_size_mb: int = Field(default=100, alias="MAX_UPLOAD_SIZE_MB")
     max_pdf_pages: int = Field(default=200, alias="MAX_PDF_PAGES")
+    pdf_chunk_size: int = Field(default=10, alias="PDF_CHUNK_SIZE")
     max_batch_files: int = Field(default=50, alias="MAX_BATCH_FILES")
     ocr_language: str = Field(default="en", alias="OCR_LANGUAGE")
     ocr_timeout: int = Field(default=120, alias="OCR_TIMEOUT")

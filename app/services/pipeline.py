@@ -114,15 +114,24 @@ class ExtractionPipeline:
         ocr_used = False
         ocr_engine_name = "pymupdf_digital"
         total_pages = 1
+        effective_doc_type = document_type
+        ai_cleaned_flag = False
+        part_extractions: List[Dict[str, Any]] = []
+        part_cleaned_texts: List[str] = []
+        settings = get_settings()
+        chunk_size = settings.pdf_chunk_size  # Default: 10 pages per part
 
-        # 2. Text Extraction & OCR
-        t0 = time.perf_counter()
+        # 2. Multi-Part 10-Page Chunked Extraction Pipeline
+        t_ocr_start = time.perf_counter()
+        t_ai_clean_ms = 0
+        t_struct_extract_ms = 0
+        t_classify_ms = 0
+
         if doc_category == "pdf":
-            page_results, total_pages = PDFService.process_pdf(file_bytes, password=password)
-            settings = get_settings()
+            total_pages = PDFService.get_pdf_page_count(file_bytes, password=password)
+            num_parts = max(1, (total_pages + chunk_size - 1) // chunk_size)
             ocr_concurrency = min(settings.worker_concurrency, 8)
             ocr_semaphore = asyncio.Semaphore(ocr_concurrency)
-            processed_count = 0
 
             await self._report_progress(
                 progress_callback,
@@ -130,66 +139,138 @@ class ExtractionPipeline:
                 total_pages=total_pages,
                 stage="ocr_extraction",
                 progress_pct=10,
-                message=f"Starting extraction for {total_pages} pages",
+                message=f"Starting extraction for {total_pages} pages in {num_parts} part{'s' if num_parts > 1 else ''} (10 pages per part)",
             )
 
-            async def _process_page(presult) -> PageExtraction:
-                nonlocal processed_count
-                try:
-                    if not presult.is_scanned:
-                        res = PageExtraction(
-                            page_number=presult.page_number,
-                            text=presult.text,
-                            confidence=1.0,
-                            is_scanned=False,
-                        )
-                    else:
-                        async with ocr_semaphore:
-                            res = await OCRService.extract_from_image_bytes(
-                                image_bytes=presult.image_bytes,
-                                page_number=presult.page_number,
-                                lang=language,
-                                is_scanned=True,
-                            )
-                except Exception as e:
-                    logger.error(f"Error processing page {presult.page_number}: {e}")
-                    all_warnings.append(
-                        ExtractionWarning(
-                            code="PAGE_EXTRACTION_ERROR",
-                            message=f"Page {presult.page_number} encountered an error: {str(e)}",
-                            severity="warning",
-                        )
-                    )
-                    res = PageExtraction(
-                        page_number=presult.page_number,
-                        text=presult.text or "",
-                        confidence=0.0,
-                        is_scanned=presult.is_scanned,
-                    )
+            for part_idx in range(1, num_parts + 1):
+                start_page = (part_idx - 1) * chunk_size + 1
+                end_page = min(part_idx * chunk_size, total_pages)
+                part_pages_count = end_page - start_page + 1
 
-                processed_count += 1
-                # Calculate progress from 10% to 55% during OCR phase
-                pct = int(10 + (45 * (processed_count / max(1, total_pages))))
+                # Report Part Start
+                current_processed = len(pages)
+                pct_start = int(10 + (45 * (current_processed / max(1, total_pages))))
                 await self._report_progress(
                     progress_callback,
-                    processed_pages=processed_count,
+                    processed_pages=current_processed,
                     total_pages=total_pages,
                     stage="ocr_extraction",
-                    progress_pct=pct,
-                    message=f"Extracted page {processed_count} of {total_pages}",
+                    progress_pct=pct_start,
+                    message=f"Processing Part {part_idx} of {num_parts} (Pages {start_page}-{end_page})",
                 )
-                return res
 
-            # Process all pages with bounded concurrency preserving order
-            pages = list(await asyncio.gather(*[_process_page(p) for p in page_results]))
-            ocr_used = any(p.is_scanned for p in pages)
-            if ocr_used:
-                ocr_engine_name = "paddleocr"
+                # Process ONLY pages in this 10-page chunk (avoids loading 200 pages into memory)
+                chunk_page_results = PDFService.process_pdf_chunk(
+                    pdf_bytes=file_bytes,
+                    start_page=start_page,
+                    end_page=end_page,
+                    password=password,
+                )
+
+                async def _process_chunk_page(presult) -> PageExtraction:
+                    try:
+                        if not presult.is_scanned:
+                            res = PageExtraction(
+                                page_number=presult.page_number,
+                                text=presult.text,
+                                confidence=1.0,
+                                is_scanned=False,
+                            )
+                        else:
+                            async with ocr_semaphore:
+                                res = await OCRService.extract_from_image_bytes(
+                                    image_bytes=presult.image_bytes,
+                                    page_number=presult.page_number,
+                                    lang=language,
+                                    is_scanned=True,
+                                )
+                    except Exception as e:
+                        logger.error(f"Error processing page {presult.page_number}: {e}")
+                        all_warnings.append(
+                            ExtractionWarning(
+                                code="PAGE_EXTRACTION_ERROR",
+                                message=f"Page {presult.page_number} encountered an error: {str(e)}",
+                                severity="warning",
+                            )
+                        )
+                        res = PageExtraction(
+                            page_number=presult.page_number,
+                            text=presult.text or "",
+                            confidence=0.0,
+                            is_scanned=presult.is_scanned,
+                        )
+
+                    return res
+
+                # Extract OCR / digital text for pages in this chunk
+                part_pages = list(await asyncio.gather(*[_process_chunk_page(p) for p in chunk_page_results]))
+                pages.extend(part_pages)
+
+                if any(p.is_scanned for p in part_pages):
+                    ocr_used = True
+                    ocr_engine_name = "paddleocr"
+
+                # Text extracted from this 10-page part
+                part_raw_text = "\n\n".join(p.text for p in part_pages if p.text).strip()
+
+                # Document Classification on Part 1 if AUTO
+                if (effective_doc_type == DocumentTypeEnum.AUTO.value or not effective_doc_type) and part_idx == 1:
+                    t_cls_start = time.perf_counter()
+                    if part_raw_text:
+                        effective_doc_type = await self.classifier.classify_document(part_raw_text)
+                    else:
+                        effective_doc_type = DocumentTypeEnum.GENERAL.value
+                    t_classify_ms += int((time.perf_counter() - t_cls_start) * 1000)
+
+                # AI Cleaning for this part
+                part_clean_text = part_raw_text
+                if clean_with_ai and part_raw_text:
+                    t_clean_start = time.perf_counter()
+                    part_clean_text, clean_warnings, _ = await self.ai_cleaner.clean_ocr_text(part_raw_text)
+                    all_warnings.extend(clean_warnings)
+                    ai_cleaned_flag = self.client.is_configured()
+                    t_ai_clean_ms += int((time.perf_counter() - t_clean_start) * 1000)
+                else:
+                    part_clean_text = AICleaner.normalize_whitespace(part_raw_text)
+
+                part_cleaned_texts.append(part_clean_text)
+
+                # Structured extraction for this 10-page part
+                text_for_extract = part_clean_text if part_clean_text else part_raw_text
+                if text_for_extract:
+                    t_ext_start = time.perf_counter()
+                    part_struct, extract_warnings = await self.extractor.extract(
+                        text=text_for_extract,
+                        document_type=effective_doc_type,
+                    )
+                    all_warnings.extend(extract_warnings)
+                    if part_struct:
+                        part_extractions.append(part_struct)
+                    t_struct_extract_ms += int((time.perf_counter() - t_ext_start) * 1000)
+
+                # Progress after completing this 10-page part
+                current_processed = len(pages)
+                pct_part_done = int(10 + (50 * (current_processed / max(1, total_pages))))
+                await self._report_progress(
+                    progress_callback,
+                    processed_pages=current_processed,
+                    total_pages=total_pages,
+                    stage="ocr_extraction",
+                    progress_pct=pct_part_done,
+                    message=f"Completed Part {part_idx} of {num_parts} ({current_processed}/{total_pages} pages processed)",
+                )
+
+                # Free pixmap buffers and trigger garbage collection after each 10-page part
+                del chunk_page_results
+                del part_pages
+                gc.collect()
+
         else:
-            # Direct Image upload
+            # Direct Image Upload (1 page)
             ocr_used = True
             ocr_engine_name = "paddleocr"
             total_pages = 1
+
             await self._report_progress(
                 progress_callback,
                 processed_pages=0,
@@ -205,19 +286,55 @@ class ExtractionPipeline:
                 is_scanned=True,
             )
             pages = [page_extraction]
+            part_raw_text = page_extraction.text
+
+            if effective_doc_type == DocumentTypeEnum.AUTO.value or not effective_doc_type:
+                t_cls_start = time.perf_counter()
+                effective_doc_type = await self.classifier.classify_document(part_raw_text)
+                t_classify_ms = int((time.perf_counter() - t_cls_start) * 1000)
+
+            part_clean_text = part_raw_text
+            if clean_with_ai and part_raw_text:
+                t_clean_start = time.perf_counter()
+                part_clean_text, clean_warnings, _ = await self.ai_cleaner.clean_ocr_text(part_raw_text)
+                all_warnings.extend(clean_warnings)
+                ai_cleaned_flag = self.client.is_configured()
+                t_ai_clean_ms = int((time.perf_counter() - t_clean_start) * 1000)
+            else:
+                part_clean_text = AICleaner.normalize_whitespace(part_raw_text)
+
+            part_cleaned_texts.append(part_clean_text)
+
+            if part_clean_text or part_raw_text:
+                t_ext_start = time.perf_counter()
+                part_struct, extract_warnings = await self.extractor.extract(
+                    text=part_clean_text or part_raw_text,
+                    document_type=effective_doc_type,
+                )
+                all_warnings.extend(extract_warnings)
+                if part_struct:
+                    part_extractions.append(part_struct)
+                t_struct_extract_ms = int((time.perf_counter() - t_ext_start) * 1000)
+
             await self._report_progress(
                 progress_callback,
                 processed_pages=1,
                 total_pages=1,
                 stage="ocr_extraction",
-                progress_pct=55,
+                progress_pct=60,
                 message="Image OCR completed",
             )
 
-        stage_timings["ocr_extraction"] = int((time.perf_counter() - t0) * 1000)
+        stage_timings["ocr_extraction"] = int((time.perf_counter() - t_ocr_start) * 1000)
+        if t_classify_ms > 0:
+            stage_timings["classification"] = t_classify_ms
+        if t_ai_clean_ms > 0:
+            stage_timings["ai_cleaning"] = t_ai_clean_ms
 
-        # Assemble Layer 1: Raw text
+        # Assemble Full Document Text & Consolidate Multi-Part Extractions
         raw_text = "\n\n".join(p.text for p in pages if p.text).strip()
+        cleaned_text = "\n\n".join(t for t in part_cleaned_texts if t).strip() if part_cleaned_texts else raw_text
+
         if not raw_text:
             all_warnings.append(
                 ExtractionWarning(
@@ -226,60 +343,23 @@ class ExtractionPipeline:
                 )
             )
 
-        # 3. Layer 2: AI Cleaning
-        cleaned_text = raw_text
-        ai_cleaned_flag = False
-        settings = get_settings()
-
-        if clean_with_ai and raw_text:
-            await self._report_progress(
-                progress_callback,
-                processed_pages=total_pages,
-                total_pages=total_pages,
-                stage="ai_cleaning",
-                progress_pct=65,
-                message="Cleaning text and normalizing characters with AI",
-            )
-            t0 = time.perf_counter()
-            cleaned_text, clean_warnings, _ = await self.ai_cleaner.clean_ocr_text(raw_text)
-            all_warnings.extend(clean_warnings)
-            ai_cleaned_flag = self.client.is_configured()
-            stage_timings["ai_cleaning"] = int((time.perf_counter() - t0) * 1000)
-        else:
-            cleaned_text = AICleaner.normalize_whitespace(raw_text)
-
-        # 4. Document Classification
-        effective_doc_type = document_type
-        if document_type == DocumentTypeEnum.AUTO.value or not document_type:
-            await self._report_progress(
-                progress_callback,
-                processed_pages=total_pages,
-                total_pages=total_pages,
-                stage="classification",
-                progress_pct=75,
-                message="Classifying document type",
-            )
-            t0 = time.perf_counter()
-            effective_doc_type = await self.classifier.classify_document(cleaned_text or raw_text)
-            stage_timings["classification"] = int((time.perf_counter() - t0) * 1000)
-
-        # 5. Layer 3: Structured Extraction
+        # Merge Structured Data from All 10-Page Parts
         await self._report_progress(
             progress_callback,
             processed_pages=total_pages,
             total_pages=total_pages,
             stage="structured_extraction",
             progress_pct=85,
-            message="Extracting structured financial entities and transactions",
+            message="Consolidating structured financial entities and transactions",
         )
-        t0 = time.perf_counter()
-        text_for_extraction = cleaned_text if cleaned_text else raw_text
-        structured_data, extract_warnings = await self.extractor.extract(
-            text=text_for_extraction,
+        t0_merge = time.perf_counter()
+        structured_data, merge_warnings = self.extractor.merge_extractions(
+            extractions=part_extractions,
             document_type=effective_doc_type,
         )
-        all_warnings.extend(extract_warnings)
-        stage_timings["structured_extraction"] = int((time.perf_counter() - t0) * 1000)
+        all_warnings.extend(merge_warnings)
+        t_struct_extract_ms += int((time.perf_counter() - t0_merge) * 1000)
+        stage_timings["structured_extraction"] = t_struct_extract_ms
 
         total_time_ms = int((time.perf_counter() - start_time) * 1000)
 

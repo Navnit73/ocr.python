@@ -199,6 +199,172 @@ class StructuredExtractor:
         warnings.extend(validation_warnings)
         return validated_data, warnings
 
+    def merge_extractions(
+        self,
+        extractions: List[Dict[str, Any]],
+        document_type: str,
+    ) -> Tuple[Optional[Dict[str, Any]], List[ExtractionWarning]]:
+        """
+        Consolidates structured extractions from multiple 10-page parts into a unified extraction.
+        Preserves chronological transaction/item order, first/last balances, and audits totals.
+        """
+        warnings: List[ExtractionWarning] = []
+        valid_items = [e for e in extractions if e and isinstance(e, dict)]
+        if not valid_items:
+            return None, warnings
+
+        if len(valid_items) == 1:
+            return self._validate_and_audit(valid_items[0], document_type)
+
+        if document_type == DocumentTypeEnum.BANK_STATEMENT.value:
+            merged: Dict[str, Any] = {
+                "bank_name": None,
+                "account_holder": None,
+                "account_number_masked": None,
+                "currency": None,
+                "statement_period": None,
+                "opening_balance": None,
+                "closing_balance": None,
+                "transactions": [],
+            }
+            # 1. Header attributes from first non-null
+            for item in valid_items:
+                if not merged["bank_name"] and item.get("bank_name"):
+                    merged["bank_name"] = item["bank_name"]
+                if not merged["account_holder"] and item.get("account_holder"):
+                    merged["account_holder"] = item["account_holder"]
+                if not merged["account_number_masked"] and item.get("account_number_masked"):
+                    merged["account_number_masked"] = item["account_number_masked"]
+                if not merged["currency"] and item.get("currency"):
+                    merged["currency"] = item["currency"]
+                if not merged["statement_period"] and item.get("statement_period"):
+                    merged["statement_period"] = item["statement_period"]
+
+            # 2. Opening balance from earliest chunk that has it
+            for item in valid_items:
+                if item.get("opening_balance") is not None:
+                    merged["opening_balance"] = item["opening_balance"]
+                    break
+
+            # 3. Closing balance from latest chunk that has it
+            for item in reversed(valid_items):
+                if item.get("closing_balance") is not None:
+                    merged["closing_balance"] = item["closing_balance"]
+                    break
+
+            # 4. Concatenate all transactions in sequence
+            for item in valid_items:
+                txs = item.get("transactions", [])
+                if isinstance(txs, list):
+                    merged["transactions"].extend(txs)
+
+            return self._validate_and_audit(merged, document_type)
+
+        elif document_type == DocumentTypeEnum.INVOICE.value:
+            merged: Dict[str, Any] = {
+                "invoice_number": None,
+                "invoice_date": None,
+                "due_date": None,
+                "supplier": {"name": None, "address": None, "tax_id": None, "email": None, "phone": None},
+                "customer": {"name": None, "address": None, "tax_id": None, "email": None, "phone": None},
+                "currency": None,
+                "subtotal": None,
+                "tax": None,
+                "total": None,
+                "line_items": [],
+            }
+            for item in valid_items:
+                if not merged["invoice_number"] and item.get("invoice_number"):
+                    merged["invoice_number"] = item["invoice_number"]
+                if not merged["invoice_date"] and item.get("invoice_date"):
+                    merged["invoice_date"] = item["invoice_date"]
+                if not merged["due_date"] and item.get("due_date"):
+                    merged["due_date"] = item["due_date"]
+                if not merged["currency"] and item.get("currency"):
+                    merged["currency"] = item["currency"]
+
+                # Supplier
+                sup = item.get("supplier") or {}
+                if isinstance(sup, dict):
+                    for k in ["name", "address", "tax_id", "email", "phone"]:
+                        if not merged["supplier"][k] and sup.get(k):
+                            merged["supplier"][k] = sup[k]
+
+                # Customer
+                cust = item.get("customer") or {}
+                if isinstance(cust, dict):
+                    for k in ["name", "address", "tax_id", "email", "phone"]:
+                        if not merged["customer"][k] and cust.get(k):
+                            merged["customer"][k] = cust[k]
+
+                # Line items
+                items = item.get("line_items", [])
+                if isinstance(items, list):
+                    merged["line_items"].extend(items)
+
+            # Totals from latest chunk that has them
+            for item in reversed(valid_items):
+                if item.get("total") is not None and merged["total"] is None:
+                    merged["total"] = item["total"]
+                if item.get("subtotal") is not None and merged["subtotal"] is None:
+                    merged["subtotal"] = item["subtotal"]
+                if item.get("tax") is not None and merged["tax"] is None:
+                    merged["tax"] = item["tax"]
+
+            return self._validate_and_audit(merged, document_type)
+
+        elif document_type == DocumentTypeEnum.RECEIPT.value:
+            merged: Dict[str, Any] = {
+                "merchant": None,
+                "receipt_number": None,
+                "date": None,
+                "currency": None,
+                "subtotal": None,
+                "tax": None,
+                "discount": None,
+                "total": None,
+                "payment_method": None,
+                "line_items": [],
+            }
+            for item in valid_items:
+                for k in ["merchant", "receipt_number", "date", "currency", "payment_method"]:
+                    if not merged[k] and item.get(k):
+                        merged[k] = item[k]
+                items = item.get("line_items", [])
+                if isinstance(items, list):
+                    merged["line_items"].extend(items)
+
+            for item in reversed(valid_items):
+                for k in ["total", "subtotal", "tax", "discount"]:
+                    if item.get(k) is not None and merged[k] is None:
+                        merged[k] = item[k]
+
+            return self._validate_and_audit(merged, document_type)
+
+        else:
+            # General
+            merged: Dict[str, Any] = {
+                "title": None,
+                "summary": None,
+                "key_value_pairs": {},
+                "tables": [],
+            }
+            summaries = []
+            for item in valid_items:
+                if not merged["title"] and item.get("title"):
+                    merged["title"] = item["title"]
+                if item.get("summary"):
+                    summaries.append(item["summary"])
+                if isinstance(item.get("key_value_pairs"), dict):
+                    merged["key_value_pairs"].update(item["key_value_pairs"])
+                if isinstance(item.get("tables"), list):
+                    merged["tables"].extend(item["tables"])
+
+            if summaries:
+                merged["summary"] = "\n\n".join(summaries)
+
+            return self._validate_and_audit(merged, document_type)
+
     def _validate_and_audit(
         self,
         raw_json: Dict[str, Any],
