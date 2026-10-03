@@ -103,6 +103,21 @@ class StorageService:
                 return True
         except Exception as e:
             logger.warning(f"Error deleting file {file_reference}: {e}")
+    @classmethod
+    async def delete_document_directory(cls, document_id: str) -> bool:
+        """Removes the entire storage folder and files for a given document_id."""
+        try:
+            root = cls._get_storage_root()
+            doc_dir = (root / document_id).resolve()
+            if not str(doc_dir).startswith(str(root)):
+                return False
+            if doc_dir.exists() and doc_dir.is_dir():
+                import shutil
+                shutil.rmtree(doc_dir, ignore_errors=True)
+                logger.info(f"Purged storage directory for document {document_id}")
+                return True
+        except Exception as e:
+            logger.warning(f"Error removing storage directory for {document_id}: {e}")
         return False
 
     @classmethod

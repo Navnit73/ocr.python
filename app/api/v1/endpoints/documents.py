@@ -11,6 +11,7 @@ from app.db.repositories.document_repo import DocumentRepository
 from app.schemas.document import DocumentDetailResponse, DocumentListResponse
 from app.schemas.ocr import ExtractionResponse
 from app.services.result_cache import ResultCache
+from app.services.storage_service import StorageService
 
 router = APIRouter(prefix="/documents", tags=["Stored Documents & Extractions"])
 
@@ -115,6 +116,7 @@ async def delete_document_by_id(
     """
     deleted = await DocumentRepository.delete_document(document_id, owner_hash=auth_client.key_hash)
     ResultCache.delete(document_id, caller_hash=auth_client.key_hash)
+    await StorageService.delete_document_directory(document_id)
 
     if not deleted:
         raise HTTPException(

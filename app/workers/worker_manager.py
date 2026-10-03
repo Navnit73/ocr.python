@@ -75,11 +75,14 @@ class WorkerManager:
 
         logger.info(f"🚀 Starting WorkerManager with concurrency limit = {settings.worker_concurrency}...")
 
-        # 1. Recover any stale jobs from previous worker crashes
+        # 1. Recover any stale jobs from previous worker crashes and purge expired storage files
         try:
             await cls.recover_stale_jobs()
+            purged = StorageService.cleanup_old_files()
+            if purged > 0:
+                logger.info(f"🧹 Purged {purged} expired storage files exceeding retention window ({settings.storage_retention_days} days).")
         except Exception as e:
-            logger.warning(f"Warning during stale job recovery on startup: {e}")
+            logger.warning(f"Warning during startup recovery and storage retention cleanup: {e}")
 
         # 2. Spawn worker tasks
         cls._workers = [
