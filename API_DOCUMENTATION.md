@@ -103,7 +103,7 @@ Uploads a document (up to 200 pages / 100MB) for non-blocking asynchronous proce
 - `callback_url` (String, optional): Webhook URL to receive signed event notifications.
 - `callback_secret` (String, optional): Secret key for HMAC-SHA256 signature verification.
 
-#### Immediate Response (`202 Accepted`):
+#### Immediate Response  (`202 Accepted`):
 ```json
 {
   "job_id": "job_a1b2c3d4e5f6",
