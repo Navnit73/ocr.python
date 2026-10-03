@@ -49,6 +49,12 @@ class JobEventBus:
                 for q in list(cls._subscribers[job_id]):
                     try:
                         q.put_nowait(message)
+                    except asyncio.QueueFull:
+                        try:
+                            q.get_nowait()
+                            q.put_nowait(message)
+                        except Exception:
+                            pass
                     except Exception as e:
                         logger.warning(f"Error pushing to job queue for {job_id}: {e}")
 
@@ -56,6 +62,12 @@ class JobEventBus:
             for q in list(cls._global_subscribers):
                 try:
                     q.put_nowait(message)
+                except asyncio.QueueFull:
+                    try:
+                        q.get_nowait()
+                        q.put_nowait(message)
+                    except Exception:
+                        pass
                 except Exception as e:
                     logger.warning(f"Error pushing to global queue: {e}")
 

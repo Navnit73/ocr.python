@@ -221,10 +221,14 @@ class DeepSeekClient:
                     or cls._shared_client.is_closed
                     or cls._loop != current_loop
                 ):
-                    limits = httpx.Limits(max_keepalive_connections=20, max_connections=50)
+                    limits = httpx.Limits(
+                        max_keepalive_connections=30,
+                        max_connections=100,
+                        keepalive_expiry=60.0,
+                    )
                     cls._shared_client = httpx.AsyncClient(
                         limits=limits,
-                        timeout=httpx.Timeout(timeout_sec, connect=10.0),
+                        timeout=httpx.Timeout(timeout_sec, connect=10.0, read=timeout_sec, write=15.0),
                     )
                     cls._loop = current_loop
         return cls._shared_client

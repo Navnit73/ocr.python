@@ -160,6 +160,38 @@ class PDFService:
         return page_results
 
     @classmethod
+    async def get_pdf_page_count_async(
+        cls,
+        pdf_bytes: bytes,
+        password: Optional[str] = None,
+    ) -> int:
+        """Non-blocking asynchronous version of get_pdf_page_count."""
+        import asyncio
+        return await asyncio.to_thread(cls.get_pdf_page_count, pdf_bytes, password)
+
+    @classmethod
+    async def process_pdf_chunk_async(
+        cls,
+        pdf_bytes: bytes,
+        start_page: int,
+        end_page: int,
+        password: Optional[str] = None,
+        dpi: Optional[int] = None,
+        min_digital_chars_per_page: int = 30,
+    ) -> List[PDFPageResult]:
+        """Non-blocking asynchronous version of process_pdf_chunk."""
+        import asyncio
+        return await asyncio.to_thread(
+            cls.process_pdf_chunk,
+            pdf_bytes,
+            start_page,
+            end_page,
+            password,
+            dpi,
+            min_digital_chars_per_page,
+        )
+
+    @classmethod
     def process_pdf(
         cls,
         pdf_bytes: bytes,
@@ -182,3 +214,4 @@ class PDFService:
             min_digital_chars_per_page=min_digital_chars_per_page,
         )
         return page_results, total_pages
+

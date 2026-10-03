@@ -47,8 +47,11 @@ class MongoDBManager:
             client_kwargs: dict[str, Any] = {
                 "serverSelectionTimeoutMS": 5000,
                 "connectTimeoutMS": 5000,
-                "maxPoolSize": 50,
-                "minPoolSize": 5,
+                "maxPoolSize": 100,
+                "minPoolSize": 10,
+                "maxIdleTimeMS": 45000,
+                "waitQueueTimeoutMS": 5000,
+                "retryWrites": True,
             }
             try:
                 import certifi
@@ -90,7 +93,7 @@ class MongoDBManager:
 
     @classmethod
     async def _setup_indexes(cls) -> None:
-        """Ensures required indexes exist for fast queries and uniqueness."""
+        """Ensures required single and compound indexes exist for fast queries, pagination, and uniqueness."""
         if cls.db is None:
             return
 
@@ -103,6 +106,11 @@ class MongoDBManager:
             await jobs.create_index("user_email")
             await jobs.create_index("status")
             await jobs.create_index("created_at")
+            # Compound indexes for fast filtered listing and stale recovery
+            await jobs.create_index([("user_id", 1), ("created_at", -1)])
+            await jobs.create_index([("user_email", 1), ("created_at", -1)])
+            await jobs.create_index([("status", 1), ("created_at", -1)])
+            await jobs.create_index([("status", 1), ("updated_at", 1)])
 
             # Extractions Collection Indexes (Shared with finlyzer.net frontend)
             extractions = cls.db["extractions"]
@@ -112,6 +120,10 @@ class MongoDBManager:
             await extractions.create_index("document_type")
             await extractions.create_index("status")
             await extractions.create_index("created_at")
+            # Compound indexes for user history and dashboard queries
+            await extractions.create_index([("user_email", 1), ("created_at", -1)])
+            await extractions.create_index([("user_email", 1), ("document_type", 1), ("created_at", -1)])
+            await extractions.create_index([("status", 1), ("created_at", -1)])
 
             # Users Collection Indexes (Shared with finlyzer.net frontend)
             users = cls.db["users"]
@@ -124,14 +136,19 @@ class MongoDBManager:
             await docs.create_index("user_email")
             await docs.create_index("document_type")
             await docs.create_index("created_at")
+            # Compound indexes for user search and document filtering
+            await docs.create_index([("user_id", 1), ("created_at", -1)])
+            await docs.create_index([("user_email", 1), ("created_at", -1)])
+            await docs.create_index([("user_id", 1), ("document_type", 1), ("created_at", -1)])
 
             # Webhook Deliveries Collection Indexes
             webhooks = cls.db["webhook_deliveries"]
             await webhooks.create_index("delivery_id", unique=True)
             await webhooks.create_index("job_id")
             await webhooks.create_index("delivered_at")
+            await webhooks.create_index([("job_id", 1), ("delivered_at", -1)])
 
-            logger.info("Database indexes verified.")
+            logger.info("Database single and compound indexes verified.")
         except Exception as e:
             logger.warning(f"Index creation warning: {e}")
 

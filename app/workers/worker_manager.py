@@ -152,12 +152,18 @@ class WorkerManager:
                         cls._active_jobs_count = max(0, cls._active_jobs_count - 1)
                     queue.task_done()
 
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, GeneratorExit):
                 logger.info(f"Worker #{worker_idx} received cancellation signal.")
                 break
             except Exception as e:
                 logger.error(f"Worker #{worker_idx} encountered unexpected loop error: {e}")
-                await asyncio.sleep(1)
+                try:
+                    current_loop = asyncio.get_running_loop()
+                    if current_loop.is_closed():
+                        break
+                    await asyncio.sleep(1)
+                except Exception:
+                    break
 
     @classmethod
     async def process_job(cls, job_id: str, user_email: Optional[str] = None) -> None:

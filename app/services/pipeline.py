@@ -129,7 +129,7 @@ class ExtractionPipeline:
         t_classify_ms = 0
 
         if doc_category == "pdf":
-            total_pages = PDFService.get_pdf_page_count(file_bytes, password=password)
+            total_pages = await PDFService.get_pdf_page_count_async(file_bytes, password=password)
             num_parts = max(1, (total_pages + chunk_size - 1) // chunk_size)
             ocr_concurrency = min(settings.worker_concurrency, 8)
             ocr_semaphore = asyncio.Semaphore(ocr_concurrency)
@@ -161,7 +161,7 @@ class ExtractionPipeline:
                 )
 
                 # Process ONLY pages in this 10-page chunk (avoids loading 200 pages into memory)
-                chunk_page_results = PDFService.process_pdf_chunk(
+                chunk_page_results = await PDFService.process_pdf_chunk_async(
                     pdf_bytes=file_bytes,
                     start_page=start_page,
                     end_page=end_page,
@@ -288,10 +288,9 @@ class ExtractionPipeline:
                     message=f"Completed Part {part_idx} of {num_parts} ({current_processed}/{total_pages} pages processed)",
                 )
 
-                # Free pixmap buffers and trigger garbage collection after each 10-page part
-                del chunk_page_results
-                del part_pages
-                gc.collect()
+                # Explicitly release references
+                chunk_page_results = None
+                part_pages = None
 
         else:
             # Direct Image Upload (1 page)

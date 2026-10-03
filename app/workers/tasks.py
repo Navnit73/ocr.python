@@ -4,6 +4,7 @@ Celery Task Definitions for Distributed Document OCR and AI Processing.
 
 import asyncio
 import logging
+from typing import Optional
 from app.workers.celery_app import celery_app
 from app.workers.worker_manager import WorkerManager
 from app.db.mongodb import MongoDBManager
