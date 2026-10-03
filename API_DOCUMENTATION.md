@@ -91,8 +91,12 @@ Uploads a document (up to 200 pages / 100MB) for non-blocking asynchronous proce
 #### Request (`multipart/form-data`):
 - `file` (*required*, File): PDF (up to 200 pages), JPG, PNG, WEBP, or TIFF.
 - `document_type` (String, default: `auto`): `auto`, `bank_statement`, `receipt`, `invoice`, `general`.
+- `extraction_engine` (String, default: `auto`): `auto`, `docling`, `pymupdf`, `paddleocr`. Automatically chooses or uses IBM Docling for advanced layout & TableFormer table parsing.
 - `language` (String, default: `en`): `auto`, `en`, `hi`, `es`, `fr`, `de`, `ch`.
+- `enable_ocr` (Boolean, default: `true`): Enable OCR fallback / optical recognition for scanned pages or images.
+- `extract_tables` (Boolean, default: `true`): Extract high-fidelity 2D table structures, column grids, and markdown representation.
 - `clean_with_ai` (Boolean, default: `true`): DeepSeek cleaning & structured entity extraction.
+- `output_format` (String, default: `json`): `json`, `markdown`, or `both`.
 - `request_id` (String, optional): Custom tracking document ID.
 - `password` (String, optional): Password for encrypted PDF files.
 - `user_email` (String, optional): Logged-in user's email address (for page quota credit tracking & MongoDB Vault sync).
@@ -324,8 +328,20 @@ Binary stream (`.xlsx`) containing:
 
 ```typescript
 export type DocumentType = 'auto' | 'bank_statement' | 'invoice' | 'receipt' | 'general';
+export type ExtractionEngine = 'auto' | 'docling' | 'pymupdf' | 'paddleocr';
+export type OutputFormat = 'json' | 'markdown' | 'both';
 export type JobStatus = 'idle' | 'uploading' | 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled';
 export type ExportFormat = 'xlsx' | 'pdf' | 'csv' | 'ofx' | 'qbo' | 'qif';
+
+export interface ExtractedTable {
+  page_number: number;
+  table_index: number;
+  rows: number;
+  cols: number;
+  headers?: string[];
+  data_grid: string[][];
+  markdown?: string;
+}
 
 export interface BankTransaction {
   date: string | null;

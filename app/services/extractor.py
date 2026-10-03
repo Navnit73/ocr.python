@@ -1,5 +1,6 @@
 """
 Structured Document Extraction Service with Pydantic Validation & Financial Auditing.
+Supports enriched context from Docling tables and Markdown layout.
 """
 
 import json
@@ -7,11 +8,12 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.schemas.bank_statement import BankStatementExtraction
-from app.schemas.receipt import ReceiptExtraction
-from app.schemas.invoice import InvoiceExtraction
+from app.schemas.bank_statement import BankStatementExtraction, BankTransaction
+from app.schemas.receipt import ReceiptExtraction, ReceiptLineItem
+from app.schemas.invoice import InvoiceExtraction, InvoiceLineItem, PartyDetails
 from app.schemas.general import GeneralExtraction
 from app.schemas.ocr import DocumentTypeEnum, ExtractionWarning
+from app.services.analytics_service import safe_float
 from app.services.deepseek_client import DeepSeekClient, safe_json_loads
 
 logger = logging.getLogger("extractor")
@@ -48,7 +50,8 @@ CRITICAL RULES:
 2. NEVER modify, round, or alter monetary values.
 3. Preserve the exact order of transactions as they appear in the statement.
 4. If a date is ambiguous (e.g. 05/06/2026), format as best as possible and attach a note if needed.
-5. CRITICAL OUTPUT FORMAT: Return ONLY the raw valid JSON object. No markdown fences, no thinking tags, no conversational preambles, and no trailing commas.
+5. Extract all rows from transaction tables accurately without dropping rows.
+6. CRITICAL OUTPUT FORMAT: Return ONLY the raw valid JSON object. No markdown fences, no thinking tags, no conversational preambles, and no trailing commas.
 """
 
 RECEIPT_PROMPT = """You are a specialized receipt data extraction engine.
@@ -154,6 +157,7 @@ class StructuredExtractor:
         self,
         text: str,
         document_type: str,
+        tables: Optional[List[Any]] = None,
     ) -> Tuple[Optional[Dict[str, Any]], List[ExtractionWarning]]:
         """
         Extracts structured JSON for the given document type.
@@ -165,7 +169,7 @@ class StructuredExtractor:
 
         if not self.client.is_configured():
             # Basic heuristic fallback
-            return self._heuristic_fallback(text, document_type)
+            return self._heuristic_fallback(text, document_type, tables=tables)
 
         prompt_map = {
             DocumentTypeEnum.BANK_STATEMENT.value: BANK_STATEMENT_PROMPT,
@@ -189,7 +193,7 @@ class StructuredExtractor:
                     message="DeepSeek AI extraction failed or timed out. Falling back to basic extraction.",
                 )
             )
-            return self._heuristic_fallback(text, document_type)
+            return self._heuristic_fallback(text, document_type, tables=tables)
 
         raw_json = safe_json_loads(response)
         if raw_json is None:
@@ -197,7 +201,7 @@ class StructuredExtractor:
             warnings.append(
                 ExtractionWarning(code="INVALID_AI_JSON", message="AI returned malformed or non-JSON payload.")
             )
-            return self._heuristic_fallback(text, document_type)
+            return self._heuristic_fallback(text, document_type, tables=tables)
 
         # Validate with document-specific Pydantic model and run arithmetic checks
         validated_data, validation_warnings = self._validate_and_audit(raw_json, document_type)
@@ -210,7 +214,7 @@ class StructuredExtractor:
         document_type: str,
     ) -> Tuple[Optional[Dict[str, Any]], List[ExtractionWarning]]:
         """
-        Consolidates structured extractions from multiple 10-page parts into a unified extraction.
+        Consolidates structured extractions from multiple parts into a unified extraction.
         Preserves chronological transaction/item order, first/last balances, and audits totals.
         """
         warnings: List[ExtractionWarning] = []
@@ -487,39 +491,120 @@ class StructuredExtractor:
         return warnings
 
     @staticmethod
-    def _heuristic_fallback(text: str, document_type: str) -> Tuple[Dict[str, Any], List[ExtractionWarning]]:
+    def _heuristic_fallback(
+        text: str,
+        document_type: str,
+        tables: Optional[List[Any]] = None,
+    ) -> Tuple[Dict[str, Any], List[ExtractionWarning]]:
         """
-        Basic regex fallback when AI is disabled or unavailable.
+        Enhanced regex & table fallback when AI is disabled or unavailable.
         """
         warnings = [
             ExtractionWarning(
                 code="AI_DISABLED",
                 message="AI extraction not enabled or not configured; returning basic heuristic extraction.",
-                severity="info"
+                severity="info",
             )
         ]
 
         if document_type == DocumentTypeEnum.BANK_STATEMENT.value:
             acc_match = re.search(r"(?:Account|A/C)\s*(?:No\.?|Number)?[:\s]+([X\d\-]{6,20})", text, re.I)
+            bank_match = re.search(r"(?:Bank|Institution)[:\s]+([A-Za-z\s]+)", text, re.I)
+            cur_match = re.search(r"\b(USD|INR|EUR|GBP|CAD|AUD)\b", text)
+            open_match = re.search(r"Opening\s+Balance[:\s]+(?:\$|₹|EUR|USD)?\s*([\d,]+\.\d{2})", text, re.I)
+            close_match = re.search(r"Closing\s+Balance[:\s]+(?:\$|₹|EUR|USD)?\s*([\d,]+\.\d{2})", text, re.I)
+
+            transactions: List[BankTransaction] = []
+
+            # Parse transactions from text lines or Markdown tables
+            for line in text.splitlines():
+                date_match = re.search(r"(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4}|\d{2}-\d{2}-\d{4})", line)
+                if date_match and len(line.split()) >= 3:
+                    amounts = re.findall(r"[\d,]+\.\d{2}", line)
+                    if amounts:
+                        desc = line.replace(date_match.group(1), "").strip()
+                        for amt in amounts:
+                            desc = desc.replace(amt, "").strip()
+                        
+                        num_0 = safe_float(amounts[0])
+                        num_last = safe_float(amounts[-1])
+                        debit = num_0 if len(amounts) >= 2 and ("debit" in line.lower() or "dr" in line.lower() or "-" in line) else None
+                        credit = num_0 if not debit else None
+                        balance = num_last if len(amounts) >= 2 else None
+
+                        transactions.append(
+                            BankTransaction(
+                                date=date_match.group(1),
+                                description=desc if desc else "Transaction",
+                                debit=debit,
+                                credit=credit,
+                                balance=balance,
+                            )
+                        )
+
             bank_model = BankStatementExtraction(
+                bank_name=bank_match.group(1).strip() if bank_match else None,
                 account_number_masked=acc_match.group(1) if acc_match else None,
-                transactions=[],
+                currency=cur_match.group(1) if cur_match else None,
+                opening_balance=safe_float(open_match.group(1)) if open_match else None,
+                closing_balance=safe_float(close_match.group(1)) if close_match else None,
+                transactions=transactions,
             )
             return bank_model.model_dump(exclude_none=False), warnings
 
         elif document_type == DocumentTypeEnum.RECEIPT.value:
             total_match = re.search(r"Total[:\s]+(?:\$|₹|EUR|USD)?\s*([\d,]+\.\d{2})", text, re.I)
+            merchant_match = re.search(r"Merchant[:\s]+([A-Za-z0-9\s]+)", text, re.I)
+            date_match = re.search(r"Date[:\s]+(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})", text, re.I)
+
+            line_items: List[ReceiptLineItem] = []
+            for line in text.splitlines():
+                if "|" in line:
+                    parts = [p.strip() for p in line.split("|") if p.strip()]
+                    if len(parts) >= 2:
+                        amt_match = re.search(r"([\d,]+\.\d{2})", parts[-1])
+                        if amt_match:
+                            line_items.append(
+                                ReceiptLineItem(
+                                    description=parts[0],
+                                    total=safe_float(amt_match.group(1)),
+                                )
+                            )
+
             rec_model = ReceiptExtraction(
-                total=float(total_match.group(1).replace(",", "")) if total_match else None,
-                line_items=[],
+                merchant=merchant_match.group(1).strip() if merchant_match else None,
+                date=date_match.group(1) if date_match else None,
+                total=safe_float(total_match.group(1)) if total_match else None,
+                line_items=line_items,
             )
             return rec_model.model_dump(exclude_none=False), warnings
 
         elif document_type == DocumentTypeEnum.INVOICE.value:
             inv_match = re.search(r"Invoice\s*(?:No\.?|#)?[:\s]+([A-Z0-9\-]+)", text, re.I)
+            date_match = re.search(r"Invoice\s*Date[:\s]+(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})", text, re.I)
+            total_match = re.search(r"Total[:\s]+(?:\$|₹|EUR|USD)?\s*([\d,]+\.\d{2})", text, re.I)
+
+            line_items: List[InvoiceLineItem] = []
+            for line in text.splitlines():
+                if "|" in line and not line.startswith("|---"):
+                    parts = [p.strip() for p in line.split("|") if p.strip()]
+                    if len(parts) >= 3 and not any(k in parts[0].lower() for k in ["description", "item"]):
+                        amt_match = re.search(r"([\d,]+\.\d{2})", parts[-1])
+                        qty_match = re.search(r"(\d+)", parts[1])
+                        if amt_match:
+                            line_items.append(
+                                InvoiceLineItem(
+                                    description=parts[0],
+                                    quantity=safe_float(qty_match.group(1)) if qty_match else 1.0,
+                                    amount=safe_float(amt_match.group(1)),
+                                )
+                            )
+
             inv_model = InvoiceExtraction(
                 invoice_number=inv_match.group(1) if inv_match else None,
-                line_items=[],
+                invoice_date=date_match.group(1) if date_match else None,
+                total=safe_float(total_match.group(1)) if total_match else None,
+                line_items=line_items,
             )
             return inv_model.model_dump(exclude_none=False), warnings
 

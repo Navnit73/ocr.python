@@ -283,6 +283,10 @@ class WorkerManager:
                 job_id=job_id,
                 user_email=effective_user_email,
                 progress_callback=_progress_callback,
+                extraction_engine=job.get("extraction_engine", "auto"),
+                enable_ocr=job.get("enable_ocr", True),
+                extract_tables=job.get("extract_tables", True),
+                output_format=job.get("output_format", "json"),
             )
 
             # 5. Mark Job as Completed

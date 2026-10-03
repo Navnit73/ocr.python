@@ -1,10 +1,26 @@
-"""
-Financial Analytics, Expense Categorization, and AI Insights Engine.
-"""
-
+import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
+
+
+def safe_float(val: Any) -> Optional[float]:
+    """Safely converts string or numeric values to float, stripping currency symbols, commas, and whitespace."""
+    if val is None or val == "":
+        return None
+    if isinstance(val, (int, float)):
+        return float(val) if not (math.isnan(val) or math.isinf(val)) else None
+    if isinstance(val, str):
+        val_str = val.strip()
+        if not val_str or val_str.lower() in ("none", "null", "n/a", "-"):
+            return None
+        cleaned = re.sub(r"[^\d.\-+]", "", val_str)
+        try:
+            res = float(cleaned)
+            return res if not (math.isnan(res) or math.isinf(res)) else None
+        except (ValueError, TypeError):
+            return None
+    return None
 
 
 class CategoryBreakdown(BaseModel):
@@ -139,8 +155,8 @@ class AnalyticsService:
 
         for t in txs:
             desc = str(t.get("description") or "Unknown Transaction")
-            debit = float(t.get("debit") or 0.0)
-            credit = float(t.get("credit") or 0.0)
+            debit = safe_float(t.get("debit")) or 0.0
+            credit = safe_float(t.get("credit")) or 0.0
 
             analytics.total_outflow += debit
             analytics.total_inflow += credit
@@ -199,7 +215,7 @@ class AnalyticsService:
 
     @classmethod
     def _analyze_receipt_or_invoice(cls, extraction: Dict[str, Any], analytics: FinancialAnalytics):
-        total = float(extraction.get("total") or extraction.get("subtotal") or 0.0)
+        total = safe_float(extraction.get("total")) or safe_float(extraction.get("subtotal")) or 0.0
         analytics.total_outflow = round(total, 2)
         items = extraction.get("line_items", [])
         analytics.transaction_count = len(items) if items else 1

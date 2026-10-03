@@ -226,3 +226,115 @@ async def test_export_direct_generate_e2e(sample_bank_extraction):
         assert res.status_code == 200
         assert res.content[:2] == b"PK"
         assert "bank_statement_direct_req_123.xlsx" in res.headers["content-disposition"]
+
+
+def test_excel_export_with_string_formatted_numbers():
+    """Verify that string-formatted amounts ($1,200.50, 5,000) are parsed as real numbers in Excel."""
+    extraction_with_strings = {
+        "bank_name": "Chase Bank",
+        "account_holder": "Jane Doe",
+        "opening_balance": "10,000.00",
+        "closing_balance": "$15,250.50",
+        "transactions": [
+            {
+                "date": "2026-05-01",
+                "description": "=cmd|' /C calc'!A0",
+                "reference": "REF001",
+                "debit": "1,500.00",
+                "credit": None,
+                "balance": "8,500.00",
+            },
+            {
+                "date": "2026-05-05",
+                "description": "Salary Deposit",
+                "reference": "SAL002",
+                "debit": None,
+                "credit": "6,750.50",
+                "balance": "15,250.50",
+            },
+        ],
+    }
+
+    excel_bytes = ExportService.generate_excel(
+        doc_id="str_test_1",
+        document_type="bank_statement",
+        extraction=extraction_with_strings,
+    )
+    wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
+    ws = wb["Itemized Ledger"]
+
+    # Verify formula injection sanitization
+    assert str(ws.cell(row=5, column=3).value).startswith("'=")
+
+    # Verify numbers are numeric and not strings
+    assert ws.cell(row=5, column=5).value == 1500.00
+    assert isinstance(ws.cell(row=5, column=5).value, (int, float))
+    assert ws.cell(row=6, column=6).value == 6750.50
+    assert isinstance(ws.cell(row=6, column=6).value, (int, float))
+
+    # Verify summary total row
+    assert ws.cell(row=7, column=5).value == 1500.00
+    assert ws.cell(row=7, column=6).value == 6750.50
+    assert ws.cell(row=7, column=7).value == 15250.50
+
+
+def test_consolidation_excel_with_invoices_and_multi_format_dates():
+    """Verify that consolidation Excel supports invoices, diverse date formats, and summary row."""
+    from app.services.consolidation_service import ConsolidationService
+
+    extractions = [
+        {
+            "currency": "USD",
+            "transactions": [
+                {
+                    "date": "15/09/2026",  # DD/MM/YYYY
+                    "description": "Software Subscription",
+                    "reference": "SUB100",
+                    "debit": "250.00",
+                    "credit": None,
+                    "balance": "5000.00",
+                }
+            ],
+        },
+        {
+            "currency": "USD",
+            "invoice_number": "INV-9900",
+            "invoice_date": "20-Oct-2026",  # DD-Mon-YYYY
+            "line_items": [
+                {
+                    "description": "Consulting Services",
+                    "quantity": 10,
+                    "unit_price": "150.00",
+                    "amount": "1500.00",
+                }
+            ],
+        },
+    ]
+
+    consolidation = ConsolidationService.consolidate(extractions)
+    assert consolidation.statement_count == 2
+    assert consolidation.total_transactions == 2
+    assert len(consolidation.monthly_trends) == 2
+
+    # Check months are 2026-09 and 2026-10
+    months = [m.month for m in consolidation.monthly_trends]
+    assert "2026-09" in months
+    assert "2026-10" in months
+
+    # Generate workbook and verify Master Ledger has both items
+    wb_bytes = ConsolidationService.generate_consolidated_excel(consolidation, extractions)
+    wb = openpyxl.load_workbook(io.BytesIO(wb_bytes))
+    assert "Annual Consolidation" in wb.sheetnames
+    assert "Master Ledger" in wb.sheetnames
+
+    ws_ledg = wb["Master Ledger"]
+    assert ws_ledg.cell(row=5, column=3).value == "Software Subscription"
+    assert ws_ledg.cell(row=5, column=5).value == 250.00
+
+    assert ws_ledg.cell(row=6, column=3).value == "Consulting Services"
+    assert ws_ledg.cell(row=6, column=5).value == 1500.00
+
+    # Summary row in Master Ledger
+    assert ws_ledg.cell(row=7, column=1).value == "TOTAL SUMMARY"
+    assert ws_ledg.cell(row=7, column=5).value == 1750.00
+

@@ -4,6 +4,8 @@ Schema package initialization.
 
 from app.schemas.ocr import (
     DocumentTypeEnum,
+    ExtractionEngineEnum,
+    OutputFormatEnum,
     LanguageEnum,
     ExtractionStatus,
     OCRBoundingBox,
@@ -43,6 +45,8 @@ from app.schemas.admin import (
 
 __all__ = [
     "DocumentTypeEnum",
+    "ExtractionEngineEnum",
+    "OutputFormatEnum",
     "LanguageEnum",
     "ExtractionStatus",
     "OCRBoundingBox",

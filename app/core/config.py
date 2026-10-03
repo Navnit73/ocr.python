@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     ai_timeout: int = Field(default=60, alias="AI_TIMEOUT")
     webhook_timeout: int = Field(default=15, alias="WEBHOOK_TIMEOUT")
 
+    # IBM Docling Configuration
+    docling_enabled: bool = Field(default=True, alias="DOCLING_ENABLED")
+    docling_ocr_enabled: bool = Field(default=True, alias="DOCLING_OCR_ENABLED")
+    docling_table_structure_enabled: bool = Field(default=True, alias="DOCLING_TABLE_STRUCTURE_ENABLED")
+    docling_timeout: int = Field(default=180, alias="DOCLING_TIMEOUT")
+    docling_num_threads: int = Field(default=4, alias="DOCLING_NUM_THREADS")
+    default_extraction_engine: str = Field(default="auto", alias="DEFAULT_EXTRACTION_ENGINE")
+
     # DeepSeek Configuration
     deepseek_api_key: str = Field(default="", alias="DEEPSEEK_API_KEY")
     deepseek_model: str = Field(default="deepseek-chat", alias="DEEPSEEK_MODEL")

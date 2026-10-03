@@ -14,6 +14,13 @@ from app.services.export_service import ExportService, sanitize_for_formula_inje
 from app.services.result_cache import ResultCache
 
 
+@pytest.fixture(autouse=True)
+def reset_limiter():
+    get_rate_limiter().reset()
+    yield
+    get_rate_limiter().reset()
+
+
 def create_sample_pdf() -> bytes:
     doc = pymupdf.open()
     page = doc.new_page()

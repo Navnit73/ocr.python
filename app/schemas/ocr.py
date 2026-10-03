@@ -15,6 +15,18 @@ class DocumentTypeEnum(str, Enum):
     GENERAL = "general"
 
 
+class ExtractionEngineEnum(str, Enum):
+    AUTO = "auto"
+    DOCLING = "docling"
+    PYMUPDF = "pymupdf"
+    PADDLEOCR = "paddleocr"
+
+
+class OutputFormatEnum(str, Enum):
+    JSON = "json"
+    MARKDOWN = "markdown"
+
+
 class LanguageEnum(str, Enum):
     AUTO = "auto"
     EN = "en"
@@ -40,7 +52,7 @@ class OCRBoundingBox(BaseModel):
 class OCRLine(BaseModel):
     """Line-level OCR extraction result."""
     text: str
-    confidence: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     bbox: Optional[List[List[float]]] = None
 
 
@@ -58,6 +70,10 @@ class ProcessingMetadata(BaseModel):
     pages: int = Field(default=1, ge=1)
     ocr_used: bool = False
     ocr_engine: str = "pymupdf"
+    extraction_engine: Optional[str] = "auto"
+    fallback_used: bool = False
+    tables_extracted: int = 0
+    docling_version: Optional[str] = None
     ai_cleaned: bool = False
     ai_model: Optional[str] = None
     processing_time_ms: int = Field(default=0, ge=0)
@@ -80,6 +96,8 @@ class ExtractionResponse(BaseModel):
     extraction: Optional[Dict[str, Any]] = None
     raw_text: str = Field(description="Layer 1: Unmodified raw OCR / digital PDF text")
     cleaned_text: Optional[str] = Field(default=None, description="Layer 2: AI cleaned/normalized text")
+    markdown: Optional[str] = Field(default=None, description="Markdown formatted representation")
+    tables: Optional[List[Dict[str, Any]]] = Field(default=None, description="Extracted structured table grids")
     pages: List[PageExtraction] = Field(default_factory=list)
     metadata: ProcessingMetadata
     warnings: List[ExtractionWarning] = Field(default_factory=list)

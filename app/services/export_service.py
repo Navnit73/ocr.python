@@ -25,7 +25,7 @@ from reportlab.platypus import (
 from reportlab.graphics.shapes import Drawing, Rect
 
 from app.schemas.export import ExportFormatEnum
-from app.services.analytics_service import AnalyticsService, FinancialAnalytics
+from app.services.analytics_service import AnalyticsService, FinancialAnalytics, safe_float
 
 
 def create_progress_bar(percentage: float, width: float = 70, height: float = 7, color_hex: str = "#4F46E5") -> Drawing:
@@ -430,27 +430,27 @@ class ExportService:
                     cell_tot.fill = total_fill
 
                     if h == "Debit":
-                        cell_tot.value = total_debits
+                        cell_tot.value = round(total_debits, 2)
                         cell_tot.font = debit_font
                         cell_tot.number_format = "#,##0.00"
                         cell_tot.alignment = Alignment(horizontal="right", vertical="center")
                     elif h == "Credit":
-                        cell_tot.value = total_credits
+                        cell_tot.value = round(total_credits, 2)
                         cell_tot.font = credit_font
                         cell_tot.number_format = "#,##0.00"
                         cell_tot.alignment = Alignment(horizontal="right", vertical="center")
                     elif h == "Balance" and c_idx == len(headers):
-                        close_bal = extraction.get("closing_balance")
+                        close_bal = safe_float(extraction.get("closing_balance"))
                         if close_bal is not None:
                             cell_tot.value = close_bal
-                        elif rows and isinstance(rows[-1][-1], (int, float)):
-                            cell_tot.value = rows[-1][-1]
+                        elif rows and safe_float(rows[-1][-1]) is not None:
+                            cell_tot.value = safe_float(rows[-1][-1])
                         cell_tot.font = bold_font
                         cell_tot.number_format = "#,##0.00"
                         cell_tot.alignment = Alignment(horizontal="right", vertical="center")
                     elif h in ["Amount", "Total"] and c_idx == len(headers):
-                        doc_total = extraction.get("total")
-                        cell_tot.value = doc_total if doc_total is not None else total_amount_sum
+                        doc_total = safe_float(extraction.get("total"))
+                        cell_tot.value = doc_total if doc_total is not None else round(total_amount_sum, 2)
                         cell_tot.font = bold_font
                         cell_tot.number_format = "#,##0.00"
                         cell_tot.alignment = Alignment(horizontal="right", vertical="center")
@@ -1408,10 +1408,12 @@ class ExportService:
                 meta.append(("Currency", str(extraction["currency"])))
             if extraction.get("statement_period"):
                 meta.append(("Period", str(extraction["statement_period"])))
-            if extraction.get("opening_balance") is not None:
-                meta.append(("Opening Balance", f"{extraction['opening_balance']:,.2f}"))
-            if extraction.get("closing_balance") is not None:
-                meta.append(("Closing Balance", f"{extraction['closing_balance']:,.2f}"))
+            open_bal = safe_float(extraction.get("opening_balance"))
+            if open_bal is not None:
+                meta.append(("Opening Balance", f"{open_bal:,.2f}"))
+            close_bal = safe_float(extraction.get("closing_balance"))
+            if close_bal is not None:
+                meta.append(("Closing Balance", f"{close_bal:,.2f}"))
 
         elif doc_type == "receipt":
             if extraction.get("merchant"):
@@ -1422,8 +1424,9 @@ class ExportService:
                 meta.append(("Date", str(extraction["date"])))
             if extraction.get("currency"):
                 meta.append(("Currency", str(extraction["currency"])))
-            if extraction.get("total") is not None:
-                meta.append(("Total Amount", f"{extraction['total']:,.2f}"))
+            tot = safe_float(extraction.get("total"))
+            if tot is not None:
+                meta.append(("Total Amount", f"{tot:,.2f}"))
             if extraction.get("payment_method"):
                 meta.append(("Payment Method", str(extraction["payment_method"])))
 
@@ -1438,63 +1441,73 @@ class ExportService:
             customer = extraction.get("customer")
             if isinstance(customer, dict) and customer.get("name"):
                 meta.append(("Customer", str(customer["name"])))
-            if extraction.get("total") is not None:
-                meta.append(("Total", f"{extraction['total']:,.2f}"))
+            tot = safe_float(extraction.get("total"))
+            if tot is not None:
+                meta.append(("Total", f"{tot:,.2f}"))
 
         return meta
 
     @staticmethod
     def _get_table_data_with_category(doc_type: str, extraction: Dict[str, Any]) -> Tuple[List[str], List[List[Any]]]:
-        """Returns table data with auto-classified category column and formula injection sanitization."""
+        """Returns table data with auto-classified category column, safe float coercion, and formula injection sanitization."""
         if doc_type == "bank_statement":
             txs = extraction.get("transactions", [])
             if txs:
                 headers = ["Date", "Category", "Description", "Reference", "Debit", "Credit", "Balance"]
-                rows = [
-                    [
+                rows = []
+                for t in txs:
+                    deb = safe_float(t.get("debit"))
+                    cred = safe_float(t.get("credit"))
+                    bal = safe_float(t.get("balance"))
+                    desc = str(t.get("description") or "")
+                    rows.append([
                         sanitize_for_formula_injection(t.get("date") or "-"),
-                        sanitize_for_formula_injection(AnalyticsService.categorize_description(str(t.get("description") or ""))),
+                        sanitize_for_formula_injection(AnalyticsService.categorize_description(desc)),
                         sanitize_for_formula_injection(t.get("description") or "-"),
                         sanitize_for_formula_injection(t.get("reference") or "-"),
-                        t.get("debit") if t.get("debit") is not None else "",
-                        t.get("credit") if t.get("credit") is not None else "",
-                        t.get("balance") if t.get("balance") is not None else "",
-                    ]
-                    for t in txs
-                ]
+                        deb if deb is not None else "",
+                        cred if cred is not None else "",
+                        bal if bal is not None else "",
+                    ])
                 return headers, rows
 
         elif doc_type == "receipt":
             items = extraction.get("line_items", [])
             if items:
                 headers = ["Description", "Category", "Quantity", "Unit Price", "Total"]
-                rows = [
-                    [
+                rows = []
+                for item in items:
+                    desc = str(item.get("description") or "")
+                    qty = safe_float(item.get("quantity"))
+                    u_price = safe_float(item.get("unit_price"))
+                    tot = safe_float(item.get("total"))
+                    rows.append([
                         sanitize_for_formula_injection(item.get("description") or "-"),
-                        sanitize_for_formula_injection(AnalyticsService.categorize_description(str(item.get("description") or ""))),
-                        item.get("quantity") if item.get("quantity") is not None else "",
-                        item.get("unit_price") if item.get("unit_price") is not None else "",
-                        item.get("total") if item.get("total") is not None else "",
-                    ]
-                    for item in items
-                ]
+                        sanitize_for_formula_injection(AnalyticsService.categorize_description(desc)),
+                        qty if qty is not None else "",
+                        u_price if u_price is not None else "",
+                        tot if tot is not None else "",
+                    ])
                 return headers, rows
 
         elif doc_type == "invoice":
             items = extraction.get("line_items", [])
             if items:
                 headers = ["Description", "Category", "Quantity", "Unit Price", "Tax Rate", "Amount"]
-                rows = [
-                    [
+                rows = []
+                for item in items:
+                    desc = str(item.get("description") or "")
+                    qty = safe_float(item.get("quantity"))
+                    u_price = safe_float(item.get("unit_price"))
+                    amt = safe_float(item.get("amount"))
+                    rows.append([
                         sanitize_for_formula_injection(item.get("description") or "-"),
-                        sanitize_for_formula_injection(AnalyticsService.categorize_description(str(item.get("description") or ""))),
-                        item.get("quantity") if item.get("quantity") is not None else "",
-                        item.get("unit_price") if item.get("unit_price") is not None else "",
-                        item.get("tax_rate") if item.get("tax_rate") is not None else "",
-                        item.get("amount") if item.get("amount") is not None else "",
-                    ]
-                    for item in items
-                ]
+                        sanitize_for_formula_injection(AnalyticsService.categorize_description(desc)),
+                        qty if qty is not None else "",
+                        u_price if u_price is not None else "",
+                        sanitize_for_formula_injection(item.get("tax_rate") or ""),
+                        amt if amt is not None else "",
+                    ])
                 return headers, rows
 
         return [], []

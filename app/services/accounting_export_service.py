@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import re
 from typing import Any, Dict, List, Optional
-from app.services.analytics_service import AnalyticsService
+from app.services.analytics_service import AnalyticsService, safe_float
 
 
 class AccountingExportService:
@@ -174,13 +174,13 @@ class AccountingExportService:
         if doc_type == "bank_statement":
             txs = extraction.get("transactions", [])
             for t in txs:
-                deb = t.get("debit")
-                cred = t.get("credit")
+                deb = safe_float(t.get("debit"))
+                cred = safe_float(t.get("credit"))
                 amt = 0.0
-                if cred is not None and float(cred) > 0:
-                    amt = float(cred)
-                elif deb is not None and float(deb) > 0:
-                    amt = -float(deb)
+                if cred is not None and cred > 0:
+                    amt = cred
+                elif deb is not None and deb > 0:
+                    amt = -deb
 
                 desc = str(t.get("description") or "")
                 results.append({
@@ -194,9 +194,9 @@ class AccountingExportService:
         elif doc_type in ["invoice", "receipt"]:
             line_items = extraction.get("line_items", [])
             for item in line_items:
-                qty = item.get("quantity") or 1
-                price = item.get("unit_price") or 0.0
-                tot = item.get("amount") or item.get("total") or (qty * price)
+                qty = safe_float(item.get("quantity")) or 1.0
+                price = safe_float(item.get("unit_price")) or 0.0
+                tot = safe_float(item.get("amount")) or safe_float(item.get("total")) or (qty * price)
                 desc = str(item.get("description") or "Line Item")
                 results.append({
                     "date": extraction.get("invoice_date") or extraction.get("date"),

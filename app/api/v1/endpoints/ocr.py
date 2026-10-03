@@ -1,5 +1,6 @@
 """
 OCR & Extraction API Endpoints with API Key Authentication, Rate Limiting, Async Background Workers & Batch.
+Supports IBM Docling, PyMuPDF, and PaddleOCR engines.
 """
 
 from typing import List, Optional, Union
@@ -14,8 +15,10 @@ from app.schemas.batch import BatchExtractionResponse
 from app.schemas.job import JobCreateResponse
 from app.schemas.ocr import (
     DocumentTypeEnum,
+    ExtractionEngineEnum,
     ExtractionResponse,
     LanguageEnum,
+    OutputFormatEnum,
 )
 from app.services.batch_service import BatchService
 from app.services.file_validator import FileValidator
@@ -49,6 +52,7 @@ def get_pipeline() -> ExtractionPipeline:
     summary="Upload document and queue asynchronous OCR extraction (HTTP 202 Accepted)",
     description=(
         "Upload a document (up to 200 pages / 100MB) for asynchronous background processing.\n\n"
+        "Supports engine selection (`auto`, `docling`, `pymupdf`, `paddleocr`), table extraction, and OCR flags.\n"
         "Immediately returns HTTP `202 Accepted` with a `job_id`, `document_id`, and `status_url`.\n"
         "The background worker picks up the job and executes OCR, AI cleaning, and structured extraction independently."
     ),
@@ -60,6 +64,10 @@ async def extract_document_async(
         default=DocumentTypeEnum.AUTO,
         description="Target document type (auto, bank_statement, receipt, invoice, general)",
     ),
+    extraction_engine: ExtractionEngineEnum = Form(
+        default=ExtractionEngineEnum.AUTO,
+        description="Extraction engine to use: auto, docling, pymupdf, paddleocr",
+    ),
     language: LanguageEnum = Form(
         default=LanguageEnum.EN,
         description="OCR language hint (auto, en, hi, es, fr, de, ch)",
@@ -67,6 +75,18 @@ async def extract_document_async(
     clean_with_ai: bool = Form(
         default=True,
         description="Whether to clean OCR text and extract structured entities using DeepSeek",
+    ),
+    enable_ocr: bool = Form(
+        default=True,
+        description="Whether to enable OCR for scanned documents and images",
+    ),
+    extract_tables: bool = Form(
+        default=True,
+        description="Whether to extract structured table grids and layout",
+    ),
+    output_format: OutputFormatEnum = Form(
+        default=OutputFormatEnum.JSON,
+        description="Output format preference: json, markdown",
     ),
     request_id: Optional[str] = Form(
         default=None,
@@ -129,8 +149,12 @@ async def extract_document_async(
         "callback_url": callback_url,
         "callback_secret": callback_secret,
         "document_type": document_type.value,
+        "extraction_engine": extraction_engine.value,
         "language": language.value,
         "clean_with_ai": clean_with_ai,
+        "enable_ocr": enable_ocr,
+        "extract_tables": extract_tables,
+        "output_format": output_format.value,
         "password": password,
         "metadata": {
             "filename": filename,
@@ -139,6 +163,7 @@ async def extract_document_async(
             "checksum_sha256": checksum,
             "doc_category": doc_category,
             "user_email": normalized_email,
+            "extraction_engine": extraction_engine.value,
         },
     }
     await JobRepository.create_job(job_doc)
@@ -159,9 +184,10 @@ async def extract_document_async(
     "/extract",
     response_model=Union[ExtractionResponse, AsyncAcceptedResponse],
     status_code=status.HTTP_200_OK,
-    summary="Extract text and structured data from documents (Up to 200 Pages)",
+    summary="Extract text, tables, and structured data from documents (Up to 200 Pages)",
     description=(
         "Upload a bank statement, receipt, invoice, general document, PDF, or image (up to 200 pages / 100MB).\n\n"
+        "Supports engine selection (`auto`, `docling`, `pymupdf`, `paddleocr`), table extraction, and OCR options.\n"
         "**Synchronous Mode** (Default): Waits for processing and returns 3-layer JSON.\n"
         "**Async Mode**: If `async_mode=true` or `callback_url` is provided, returns HTTP `202 Accepted` immediately.\n"
         "**Authentication**: Requires valid `X-API-Key` or `Authorization: Bearer <key>`."
@@ -175,6 +201,10 @@ async def extract_document(
         default=DocumentTypeEnum.AUTO,
         description="Target document type (auto, bank_statement, receipt, invoice, general)",
     ),
+    extraction_engine: ExtractionEngineEnum = Form(
+        default=ExtractionEngineEnum.AUTO,
+        description="Extraction engine to use: auto, docling, pymupdf, paddleocr",
+    ),
     language: LanguageEnum = Form(
         default=LanguageEnum.EN,
         description="OCR language hint (auto, en, hi, es, fr, de, ch)",
@@ -182,6 +212,18 @@ async def extract_document(
     clean_with_ai: bool = Form(
         default=True,
         description="Whether to clean OCR text and extract structured entities using DeepSeek",
+    ),
+    enable_ocr: bool = Form(
+        default=True,
+        description="Whether to enable OCR for scanned documents and images",
+    ),
+    extract_tables: bool = Form(
+        default=True,
+        description="Whether to extract structured table grids and layout",
+    ),
+    output_format: OutputFormatEnum = Form(
+        default=OutputFormatEnum.JSON,
+        description="Output format preference: json, markdown",
     ),
     async_mode: bool = Form(
         default=False,
@@ -248,8 +290,12 @@ async def extract_document(
             "callback_url": callback_url,
             "callback_secret": callback_secret,
             "document_type": document_type.value,
+            "extraction_engine": extraction_engine.value,
             "language": language.value,
             "clean_with_ai": clean_with_ai,
+            "enable_ocr": enable_ocr,
+            "extract_tables": extract_tables,
+            "output_format": output_format.value,
             "password": password,
             "metadata": {
                 "filename": filename,
@@ -258,6 +304,7 @@ async def extract_document(
                 "checksum_sha256": checksum,
                 "doc_category": doc_category,
                 "user_email": normalized_email,
+                "extraction_engine": extraction_engine.value,
             },
         }
         await JobRepository.create_job(job_doc)
@@ -286,6 +333,10 @@ async def extract_document(
         password=password,
         owner_hash=auth_client.key_hash,
         user_email=normalized_email,
+        extraction_engine=extraction_engine.value,
+        enable_ocr=enable_ocr,
+        extract_tables=extract_tables,
+        output_format=output_format.value,
     )
 
 
@@ -296,7 +347,7 @@ async def extract_document(
     summary="Batch process multiple documents or a Zip archive",
     description=(
         "Upload up to 50 documents or a single `.zip` archive containing invoices, receipts, or statements. "
-        "Processes all files concurrently with isolated error handling and computes consolidated inflow/outflow metrics.\n\n"
+        "Supports engine selection (`auto`, `docling`, `pymupdf`, `paddleocr`) and table extraction options.\n\n"
         "**Authentication**: Requires valid `X-API-Key` or `Authorization: Bearer <key>`."
     ),
     dependencies=[Depends(check_rate_limit)],
@@ -307,6 +358,10 @@ async def batch_extract(
         default=DocumentTypeEnum.AUTO,
         description="Target document type hint",
     ),
+    extraction_engine: ExtractionEngineEnum = Form(
+        default=ExtractionEngineEnum.AUTO,
+        description="Extraction engine to use: auto, docling, pymupdf, paddleocr",
+    ),
     language: LanguageEnum = Form(
         default=LanguageEnum.EN,
         description="OCR language hint",
@@ -314,6 +369,18 @@ async def batch_extract(
     clean_with_ai: bool = Form(
         default=True,
         description="Whether to clean OCR text and extract structured entities using DeepSeek",
+    ),
+    enable_ocr: bool = Form(
+        default=True,
+        description="Whether to enable OCR for scanned documents and images",
+    ),
+    extract_tables: bool = Form(
+        default=True,
+        description="Whether to extract structured table grids and layout",
+    ),
+    output_format: OutputFormatEnum = Form(
+        default=OutputFormatEnum.JSON,
+        description="Output format preference: json, markdown",
     ),
     user_email: Optional[str] = Form(
         default=None,
@@ -333,4 +400,8 @@ async def batch_extract(
         owner_hash=auth_client.key_hash,
         user_email=user_email,
         pipeline=pipeline,
+        extraction_engine=extraction_engine.value,
+        enable_ocr=enable_ocr,
+        extract_tables=extract_tables,
+        output_format=output_format.value,
     )

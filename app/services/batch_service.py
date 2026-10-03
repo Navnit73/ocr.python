@@ -11,7 +11,7 @@ from fastapi import HTTPException, UploadFile, status
 
 from app.core.config import get_settings
 from app.schemas.batch import BatchExtractionResponse, BatchItemResult
-from app.schemas.ocr import DocumentTypeEnum, ExtractionStatus
+from app.schemas.ocr import DocumentTypeEnum, ExtractionEngineEnum, ExtractionStatus, OutputFormatEnum
 from app.services.file_validator import FileValidator
 from app.services.pipeline import ExtractionPipeline
 
@@ -29,6 +29,10 @@ class BatchService:
         owner_hash: Optional[str] = None,
         user_email: Optional[str] = None,
         pipeline: Optional[ExtractionPipeline] = None,
+        extraction_engine: str = ExtractionEngineEnum.AUTO.value,
+        enable_ocr: bool = True,
+        extract_tables: bool = True,
+        output_format: str = OutputFormatEnum.JSON.value,
     ) -> BatchExtractionResponse:
         """
         Extracts up to settings.max_batch_files documents concurrently.
@@ -94,6 +98,10 @@ class BatchService:
                         clean_with_ai=clean_with_ai,
                         owner_hash=owner_hash,
                         user_email=normalized_email,
+                        extraction_engine=extraction_engine,
+                        enable_ocr=enable_ocr,
+                        extract_tables=extract_tables,
+                        output_format=output_format,
                     )
                     dur_ms = int((time.perf_counter() - t0) * 1000)
                     return BatchItemResult(
