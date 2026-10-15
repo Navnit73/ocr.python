@@ -132,6 +132,12 @@ async def upload_reconciliation(
     date_tolerance_days: int = Form(default=2, ge=0, le=31, description="Max days between matching bank and ledger dates"),
     description_matching: bool = Form(default=True, description="Use description similarity when scoring matches"),
     user_email: Optional[str] = Form(default=None, description="Logged-in user email (authenticated callers only)"),
+    bank_statement_password: Optional[str] = Form(
+        default=None, max_length=256, description="Password for a password-protected bank statement PDF (never stored)"
+    ),
+    business_ledger_password: Optional[str] = Form(
+        default=None, max_length=256, description="Password for a password-protected business ledger PDF (never stored)"
+    ),
     caller: ReconciliationCaller = Depends(resolve_caller),
 ) -> ReconciliationUploadResponse:
     validated_webhook: Optional[str] = None
@@ -144,8 +150,9 @@ async def upload_reconciliation(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="webhook_secret must be at most 256 characters.")
 
     documents = {}
+    passwords = {"bank_statement": bank_statement_password, "business_ledger": business_ledger_password}
     for role, upload in zip(ROLES, (bank_statement, business_ledger)):
-        kind, content = await ReconciliationService.validate_document(upload, role)
+        kind, content = await ReconciliationService.validate_document(upload, role, passwords[role] or None)
         documents[role] = (kind, upload.filename, content, upload.content_type)
 
     record, access_token = await ReconciliationService.create_reconciliation(

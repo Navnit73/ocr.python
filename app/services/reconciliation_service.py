@@ -20,6 +20,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
+import pymupdf
 from fastapi import HTTPException, UploadFile, status
 from pymongo.errors import DocumentTooLarge
 
@@ -43,6 +44,10 @@ logger = logging.getLogger("reconciliation")
 SPREADSHEET_EXTENSIONS = (".csv", ".xlsx")
 ROLES = ("bank_statement", "business_ledger")
 ROLE_LABELS = {"bank_statement": "bank statement", "business_ledger": "business ledger"}
+
+# Fixed upload error texts (after the "<Label>: " prefix) that clients match on to ask for a password.
+PDF_PASSWORD_REQUIRED = "This PDF is password-protected. Provide its password to continue."
+PDF_PASSWORD_INCORRECT = "Incorrect PDF password."
 TERMINAL_JOB_STATUSES = ("completed", "failed", "cancelled")
 WEBHOOK_MAX_ATTEMPTS = 4  # backoff 1s, 2s, 4s between attempts (bounded)
 STALE_CLAIM_SECONDS = 600
@@ -83,9 +88,34 @@ class ReconciliationService:
     # Validation
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def unlock_pdf(content: bytes, password: Optional[str]) -> bytes:
+        """
+        Returns the PDF unchanged when it opens without a password, or an unencrypted copy when it
+        needs one and `password` is correct. Only the unlocked copy is stored and processed, so the
+        password itself is never persisted. Raises ValueError(PDF_PASSWORD_REQUIRED / _INCORRECT).
+        """
+        try:
+            doc = pymupdf.open(stream=content, filetype="pdf")
+        except Exception:
+            return content  # Damaged files are reported by the normal PDF validation.
+        try:
+            if not doc.needs_pass:
+                return content
+            if not password:
+                raise ValueError(PDF_PASSWORD_REQUIRED)
+            if not doc.authenticate(password):
+                raise ValueError(PDF_PASSWORD_INCORRECT)
+            return doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_NONE)
+        finally:
+            doc.close()
+
     @classmethod
-    async def validate_document(cls, upload: UploadFile, role: str) -> Tuple[str, bytes]:
-        """Returns (kind, bytes) where kind is 'pdf', 'image' or 'spreadsheet'."""
+    async def validate_document(cls, upload: UploadFile, role: str, password: Optional[str] = None) -> Tuple[str, bytes]:
+        """
+        Returns (kind, bytes) where kind is 'pdf', 'image' or 'spreadsheet'. A password-protected PDF
+        is unlocked with `password` and its unencrypted bytes are returned.
+        """
         settings = get_settings()
         label = ROLE_LABELS[role]
         filename = upload.filename or ""
@@ -100,12 +130,16 @@ class ReconciliationService:
             try:
                 kind, content = await FileValidator.validate_upload(upload)
                 if kind == "pdf":
-                    # Rejects encrypted PDFs and PDFs above MAX_PDF_PAGES before any job is queued.
+                    try:
+                        content = await asyncio.to_thread(cls.unlock_pdf, content, password)
+                    except ValueError as e:
+                        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+                    # Rejects PDFs above MAX_PDF_PAGES (and any still locked) before any job is queued.
                     await PDFService.get_pdf_page_count_async(content)
             except HTTPException as e:
                 detail = str(e.detail)
-                if "password" in detail.lower():
-                    detail = "Password-protected PDFs are not supported for reconciliation. Upload an unlocked copy."
+                if "password" in detail.lower() and detail not in (PDF_PASSWORD_REQUIRED, PDF_PASSWORD_INCORRECT):
+                    detail = PDF_PASSWORD_REQUIRED
                 raise HTTPException(status_code=e.status_code, detail=f"{label.capitalize()}: {detail}")
             return kind, content
 

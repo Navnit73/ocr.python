@@ -748,18 +748,56 @@ async def test_guest_ocr_records_inherit_expiry(monkeypatch):
     assert job["expires_at"] == record["expires_at"]
 
 
-@pytest.mark.asyncio
-async def test_encrypted_pdf_rejected_with_clear_message():
+def encrypted_pdf(user_pw: str = "u") -> bytes:
     doc = pymupdf.open()
     doc.new_page().insert_text((50, 50), "secret")
-    encrypted = doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256, owner_pw="o", user_pw="u")
+    encrypted = doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256, owner_pw="o", user_pw=user_pw)
     doc.close()
+    return encrypted
+
+
+@pytest.mark.asyncio
+async def test_encrypted_pdf_without_password_asks_for_it():
     async with client() as c:
-        resp = await c.post(f"{BASE}/upload", files=files(ledger=("ledger.pdf", encrypted, "application/pdf")))
+        resp = await c.post(f"{BASE}/upload", files=files(ledger=("ledger.pdf", encrypted_pdf(), "application/pdf")))
     assert resp.status_code == 400
-    assert resp.json()["error"] == (
-        "Business ledger: Password-protected PDFs are not supported for reconciliation. Upload an unlocked copy."
-    )
+    assert resp.json()["error"] == "Business ledger: This PDF is password-protected. Provide its password to continue."
+
+
+@pytest.mark.asyncio
+async def test_encrypted_pdf_with_wrong_password_is_rejected():
+    async with client() as c:
+        resp = await c.post(
+            f"{BASE}/upload",
+            files=files(bank=("bank.pdf", encrypted_pdf(), "application/pdf")),
+            data={"bank_statement_password": "wrong"},
+        )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "Bank statement: Incorrect PDF password."
+
+
+@pytest.mark.asyncio
+async def test_encrypted_pdf_with_password_is_accepted_and_password_not_stored():
+    async with client() as c:
+        resp = await c.post(
+            f"{BASE}/upload",
+            files=files(ledger=("ledger.pdf", encrypted_pdf("s3cret-pw"), "application/pdf")),
+            data={"business_ledger_password": "s3cret-pw"},
+        )
+    assert resp.status_code == 202, resp.text
+    db = MongoDBManager.get_db()
+    record = await db["reconciliations"].find_one({"reconciliation_id": resp.json()["reconciliation_id"]})
+    job = await db["jobs"].find_one({"job_id": record["documents"]["business_ledger"]["job_id"]})
+    assert "s3cret-pw" not in json.dumps(record, default=str)
+    assert "s3cret-pw" not in json.dumps(job, default=str)
+
+
+def test_unlock_pdf_returns_unencrypted_copy():
+    unlocked = ReconciliationService.unlock_pdf(encrypted_pdf(), "u")
+    doc = pymupdf.open(stream=unlocked, filetype="pdf")
+    assert not doc.needs_pass and not doc.is_encrypted
+    assert "secret" in doc[0].get_text()
+    doc.close()
 
 
 # ---------------------------------------------------------------------------

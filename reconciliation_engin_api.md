@@ -82,7 +82,6 @@ The same four endpoints serve both kinds of caller.
 
 **Not supported:**
 - Legacy `.xls` files.
-- Password-protected PDFs. Upload an unlocked copy.
 - Files whose contents don't match their extension (signatures are checked).
 
 **Spreadsheet layout.** The parser looks in the first 30 rows for a header row with a **date** column and at least one **amount** column. Headers are matched case- and accent-insensitively. Recognized headers include:
@@ -120,6 +119,10 @@ Uploads both documents, queues extraction, and returns **immediately**. Every su
 | `date_tolerance_days` | integer 0–31 | | `2` | Maximum days between matching bank and ledger dates |
 | `description_matching` | boolean | | `true` | Use description similarity when scoring matches |
 | `user_email` | string | | — | Authenticated callers only; ignored for guests |
+| `bank_statement_password` | string (≤256) | | — | Password for a password-protected bank statement PDF |
+| `business_ledger_password` | string (≤256) | | — | Password for a password-protected business ledger PDF |
+
+**Password-protected PDFs.** Without a password the upload returns `400` with `<Label>: This PDF is password-protected. Provide its password to continue.`; a wrong password returns `<Label>: Incorrect PDF password.` (`<Label>` is `Bank statement` or `Business ledger`). The PDF is unlocked in memory and only the unencrypted copy is stored; the password is never saved or logged.
 
 ### Response: `202 Accepted`
 
@@ -612,7 +615,7 @@ Validation errors (`422`) use `"error": "Request validation failed"` and add a `
 
 | Code | When | Endpoints |
 |---|---|---|
-| `400` | Unsupported file type, empty file, content doesn't match extension, corrupted or password-protected PDF, too many PDF pages, invalid or private `webhook_url`, `webhook_secret` too long. File errors start with `Bank statement:` or `Business ledger:` | 1 |
+| `400` | Unsupported file type, empty file, content doesn't match extension, corrupted PDF, password-protected PDF without (or with a wrong) password, too many PDF pages, invalid or private `webhook_url`, `webhook_secret` too long. File errors start with `Bank statement:` or `Business ledger:` | 1 |
 | `401` | An API key was sent but is invalid | all |
 | `404` | Unknown or malformed ID, or the caller isn't allowed to see it | 2, 3, 4 |
 | `409` | Reconciliation not `completed` yet (or `failed`) | 3, 4 |
