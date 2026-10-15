@@ -148,6 +148,15 @@ class MongoDBManager:
             await webhooks.create_index("delivered_at")
             await webhooks.create_index([("job_id", 1), ("delivered_at", -1)])
 
+            # Reconciliations Collection Indexes (guest records expire via TTL on expires_at)
+            reconciliations = cls.db["reconciliations"]
+            await reconciliations.create_index("reconciliation_id", unique=True)
+            await reconciliations.create_index([("owner_id", 1), ("created_at", -1)])
+            await reconciliations.create_index("expires_at", expireAfterSeconds=0)
+            # Guest reconciliation OCR output expires with its reconciliation (field is absent elsewhere)
+            for coll_name in ("jobs", "documents", "extractions"):
+                await cls.db[coll_name].create_index("expires_at", expireAfterSeconds=0)
+
             logger.info("Database single and compound indexes verified.")
         except Exception as e:
             logger.warning(f"Index creation warning: {e}")

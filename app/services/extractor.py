@@ -52,6 +52,10 @@ CRITICAL RULES:
 4. If a date is ambiguous (e.g. 05/06/2026), format as best as possible and attach a note if needed.
 5. Extract all rows from transaction tables accurately without dropping rows.
 6. CRITICAL OUTPUT FORMAT: Return ONLY the raw valid JSON object. No markdown fences, no thinking tags, no conversational preambles, and no trailing commas.
+7. NUMBER FORMATS: Statements use different decimal and grouping separators. Work out the document's convention
+   from all of its amounts, then output plain JSON numbers with a dot decimal and no grouping:
+   "1,234.56" -> 1234.56, "1,23,456.78" -> 123456.78, "1.234,56" -> 1234.56, "1 234,56" -> 1234.56,
+   "1'234.50" -> 1234.50, "12,50" -> 12.5 (in a comma-decimal statement). Never output 1.23456 or 123456 for "1.234,56".
 """
 
 RECEIPT_PROMPT = """You are a specialized receipt data extraction engine.

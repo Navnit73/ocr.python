@@ -10,6 +10,7 @@ from app.api.v1.endpoints.jobs import router as jobs_router
 from app.api.v1.endpoints.documents import router as documents_router
 from app.api.v1.endpoints.export import router as export_router
 from app.api.v1.endpoints.admin import router as admin_router
+from app.api.v1.endpoints.reconciliation import router as reconciliation_router
 
 router = APIRouter()
 
@@ -50,3 +51,4 @@ router.include_router(jobs_router)
 router.include_router(documents_router)
 router.include_router(export_router)
 router.include_router(admin_router)
+router.include_router(reconciliation_router)

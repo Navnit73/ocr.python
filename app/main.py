@@ -87,6 +87,13 @@ def create_application() -> FastAPI:
             ),
         },
         {
+            "name": "Bank Reconciliation",
+            "description": (
+                "Upload a bank statement and a business ledger, receive a `reconciliation_id`, and poll it for progress, "
+                "the saved report, paginated discrepancies, and XLSX/CSV exports. Works for API-key users and guests."
+            ),
+        },
+        {
             "name": "Health",
             "description": "System liveness, readiness, and connectivity health check endpoints.",
         },

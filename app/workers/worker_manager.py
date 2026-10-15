@@ -361,6 +361,7 @@ class WorkerManager:
                 )
 
             logger.info(f"✅ Background job {job_id} completed successfully for user {effective_user_email}.")
+            await cls._notify_reconciliation(job)
 
         except Exception as e:
             error_msg = str(e)
@@ -424,6 +425,19 @@ class WorkerManager:
                     },
                     user_email=effective_user_email,
                 )
+
+            await cls._notify_reconciliation(job)
+
+    @classmethod
+    async def _notify_reconciliation(cls, job: Dict[str, Any]) -> None:
+        """Lets a linked bank reconciliation proceed once this extraction job is terminal."""
+        if not (job.get("metadata") or {}).get("reconciliation_id"):
+            return
+        try:
+            from app.services.reconciliation_service import ReconciliationService
+            await ReconciliationService.on_extraction_job_finished(job)
+        except Exception as e:
+            logger.error(f"Reconciliation hook failed for job {job.get('job_id')}: {type(e).__name__}", exc_info=True)
 
     @classmethod
     async def recover_stale_jobs(cls) -> int:

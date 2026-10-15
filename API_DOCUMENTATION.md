@@ -320,6 +320,55 @@ Binary stream (`.xlsx`) containing:
 
 ---
 
+### 9. Bank Reconciliation (`/api/v1/reconciliation`)
+
+Upload a bank statement and a business ledger; get one `reconciliation_id`; poll it for progress and the saved report.
+PDF/image documents go through the normal OCR job pipeline (100–200 pages supported); CSV/XLSX files are parsed directly.
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/v1/reconciliation/upload` | Upload both documents, returns `202` + `reconciliation_id` |
+| `GET` | `/api/v1/reconciliation/{id}` | Status, progress and (when completed) the full saved report |
+| `GET` | `/api/v1/reconciliation/{id}/transactions` | Paginated details, `status=matched\|unmatched_bank\|unmatched_ledger\|possible_duplicates\|amount_mismatches` |
+| `GET` | `/api/v1/reconciliation/{id}/export?format=xlsx\|csv` | Download the report |
+
+**Access:** with `X-API-Key` / `Authorization: Bearer` the record is owned by that key. Without a key the caller is a guest:
+the upload response contains an `access_token` (shown once, only its SHA-256 hash is stored) that must be sent as
+`X-Reconciliation-Token` on every later call. Guest records expire after `STORAGE_RETENTION_DAYS` (`410 Gone`).
+Unknown IDs and wrong credentials both return `404`. `transactions` and `export` return `409` until the reconciliation completes.
+
+**Webhooks (optional):** `webhook_url` must be HTTPS and resolve to a public IP. Events `reconciliation.completed` /
+`reconciliation.failed` are POSTed with `X-Webhook-Signature: sha256=<HMAC-SHA256(body, webhook_secret)>`, up to 4 attempts
+with 1s/2s/4s backoff; redirects are not followed. Delivery status is stored on the record and the secret is deleted afterwards.
+
+```bash
+# Guest upload
+curl -X POST http://localhost:8000/api/v1/reconciliation/upload \
+  -F "bank_statement=@statement.pdf" \
+  -F "business_ledger=@ledger.xlsx" \
+  -F "date_tolerance_days=2" \
+  -F "description_matching=true" \
+  -F "webhook_url=https://example.com/hooks/reconciliation" \
+  -F "webhook_secret=my-signing-secret"
+# -> 202 {"success":true,"reconciliation_id":"rec_...","status":"queued","status_url":"/api/v1/reconciliation/rec_...","access_token":"..."}
+
+# Authenticated upload (no access_token returned)
+curl -X POST http://localhost:8000/api/v1/reconciliation/upload \
+  -H "X-API-Key: $API_KEY" -F "bank_statement=@statement.pdf" -F "business_ledger=@ledger.csv"
+
+# Poll status / report
+curl http://localhost:8000/api/v1/reconciliation/rec_XXXX -H "X-Reconciliation-Token: $TOKEN"
+
+# Unmatched bank entries, page 1
+curl "http://localhost:8000/api/v1/reconciliation/rec_XXXX/transactions?status=unmatched_bank&page=1&page_size=50" \
+  -H "X-API-Key: $API_KEY"
+
+# Export
+curl -OJ "http://localhost:8000/api/v1/reconciliation/rec_XXXX/export?format=xlsx" -H "X-API-Key: $API_KEY"
+```
+
+---
+
 ## 💻 Complete Frontend TypeScript Implementation Guide
 
 ---
