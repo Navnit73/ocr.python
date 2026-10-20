@@ -3,6 +3,7 @@ Structured Document Extraction Service with Pydantic Validation & Financial Audi
 Supports enriched context from Docling tables and Markdown layout.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -56,6 +57,17 @@ CRITICAL RULES:
    from all of its amounts, then output plain JSON numbers with a dot decimal and no grouping:
    "1,234.56" -> 1234.56, "1,23,456.78" -> 123456.78, "1.234,56" -> 1234.56, "1 234,56" -> 1234.56,
    "1'234.50" -> 1234.50, "12,50" -> 12.5 (in a comma-decimal statement). Never output 1.23456 or 123456 for "1.234,56".
+8. The same schema is used for bank statements, cash books, general-ledger / account registers and accounting
+   exports (e.g. QuickBooks / Tally / Xero reports). Each dated money movement is one transaction.
+9. SINGLE SIGNED AMOUNT COLUMN: when a row has one amount (e.g. "-127.88" or "127.88 DR"), put a negative / DR
+   amount in "debit" and a positive / CR amount in "credit", always as a positive number.
+10. DEBIT vs CREDIT COLUMNS: text may list one table cell per line, so use the column headers and the running
+   balance to decide which column an amount belongs to. Copy the document's own Debit/Credit labels; do not
+   re-interpret them. A balance that rises/falls by exactly the amount tells you the side for that row.
+11. Never output opening/closing balance, "balance brought/carried forward", subtotal, page-total or total rows
+   as transactions; put opening/closing balances in "opening_balance" / "closing_balance".
+12. DATES: decide the day/month order from the whole document (a value above 12 in the second position means
+   MM/DD) and output ISO YYYY-MM-DD. A description that wraps onto several lines belongs to one transaction.
 """
 
 RECEIPT_PROMPT = """You are a specialized receipt data extraction engine.
@@ -151,6 +163,53 @@ CRITICAL OUTPUT FORMAT: Return ONLY the raw valid JSON object. No markdown fence
 """
 
 
+# Statement text per AI request. Dense statements produce ~1 output token per 2-3 input characters,
+# so this keeps each JSON answer well under the model's 8K output-token limit.
+STATEMENT_SEGMENT_CHARS = 6000
+MIN_SPLIT_CHARS = 1500
+_ROW_START = re.compile(
+    r"^\s*(\d{1,4}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{1,2}[\s\-/][A-Za-z]{3,9}[\s\-/,]+\d{2,4}|[A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4})"
+)
+
+
+def is_complete_json(response: str) -> bool:
+    """False when an LLM JSON answer is cut off (e.g. max_tokens reached) or otherwise not strictly valid."""
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", str(response), flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned).strip()
+    try:
+        json.loads(cleaned, strict=False)
+        return True
+    except ValueError:
+        return False
+
+
+def split_statement_text(text: str, max_chars: int) -> List[str]:
+    """
+    Splits statement text into segments of at most ~max_chars without cutting a transaction in half:
+    each new segment starts at a line that begins with a date (a new transaction row) or a blank line.
+    """
+    if len(text) <= max_chars:
+        return [text]
+    lines = text.splitlines(keepends=True)
+    segments: List[str] = []
+    start, size = 0, 0
+    for i, line in enumerate(lines):
+        if size + len(line) > max_chars and i > start:
+            cut = i
+            for j in range(i, start, -1):  # latest row boundary inside this segment
+                if _ROW_START.match(lines[j]) or not lines[j].strip():
+                    cut = j
+                    break
+            if cut <= start:
+                cut = i
+            segments.append("".join(lines[start:cut]))
+            start = cut
+            size = sum(len(l) for l in lines[start:i])
+        size += len(line)
+    segments.append("".join(lines[start:]))
+    return [seg for seg in segments if seg.strip()]
+
+
 class StructuredExtractor:
     """Extracts typed Pydantic models from document text using DeepSeek and verifies arithmetic."""
 
@@ -184,12 +243,27 @@ class StructuredExtractor:
 
         system_prompt = prompt_map.get(document_type, GENERAL_PROMPT)
 
+        if document_type == DocumentTypeEnum.BANK_STATEMENT.value:
+            segments = split_statement_text(text, STATEMENT_SEGMENT_CHARS)
+            if len(segments) > 1:
+                return await self._extract_statement_segments(segments, system_prompt, tables)
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"<DOCUMENT_TEXT>\n{text}\n</DOCUMENT_TEXT>"},
         ]
 
         response = await self.client.chat_completion(messages, temperature=0.0, json_mode=True)
+        if (
+            document_type == DocumentTypeEnum.BANK_STATEMENT.value
+            and response
+            and not is_complete_json(response)
+            and len(text) >= MIN_SPLIT_CHARS
+        ):
+            # Output hit the token limit mid-JSON; repairing it would silently drop transactions.
+            halves = split_statement_text(text, (len(text) + 1) // 2)
+            if len(halves) > 1:
+                return await self._extract_statement_segments(halves, system_prompt, tables)
         if not response:
             warnings.append(
                 ExtractionWarning(
@@ -211,6 +285,29 @@ class StructuredExtractor:
         validated_data, validation_warnings = self._validate_and_audit(raw_json, document_type)
         warnings.extend(validation_warnings)
         return validated_data, warnings
+
+    async def _extract_statement_segments(
+        self,
+        segments: List[str],
+        system_prompt: str,
+        tables: Optional[List[Any]],
+    ) -> Tuple[Optional[Dict[str, Any]], List[ExtractionWarning]]:
+        """Extracts each statement segment separately (bounded concurrency) and merges them in order."""
+        semaphore = asyncio.Semaphore(4)
+
+        async def run(segment: str):
+            async with semaphore:
+                return await self.extract(segment, DocumentTypeEnum.BANK_STATEMENT.value)
+
+        results = await asyncio.gather(*(run(seg) for seg in segments))
+        warnings: List[ExtractionWarning] = []
+        parts = []
+        for part, part_warnings in results:
+            warnings.extend(part_warnings)
+            if part:
+                parts.append(part)
+        merged, merge_warnings = self.merge_extractions(parts, DocumentTypeEnum.BANK_STATEMENT.value)
+        return merged, warnings + merge_warnings
 
     def merge_extractions(
         self,

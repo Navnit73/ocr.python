@@ -21,6 +21,7 @@ from app.db.mongodb import MongoDBManager
 from app.main import app
 from app.schemas.ocr import ExtractionResponse, ProcessingMetadata
 from app.services import reconciliation_service as rec_service_module
+from app.services.deepseek_client import DeepSeekClient
 from app.services.pipeline import ExtractionPipeline
 from app.services.reconciliation_engine import (
     ReconciliationError,
@@ -50,6 +51,8 @@ async def environment(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
     monkeypatch.setattr(settings, "rate_limit_enabled", False)
     monkeypatch.setattr(settings, "require_api_key", True)
+    # AI-assisted recovery paths are exercised with explicit fakes; never call the real DeepSeek API from tests.
+    monkeypatch.setattr(DeepSeekClient, "is_configured", lambda self: False)
     await MongoDBManager.disconnect()
     await MongoDBManager.connect(force_mock=True)
     await WorkerManager.start()
@@ -470,7 +473,8 @@ async def test_ocr_failure_marks_reconciliation_failed(monkeypatch, public_dns, 
         rid, headers = body["reconciliation_id"], {"X-Reconciliation-Token": body["access_token"]}
         final = await wait_for(c, rid, headers)
         assert final["status"] == "failed" and final["success"] is False
-        assert final["error"] == "Unable to extract transactions from the business ledger."
+        assert final["error"].startswith("Unable to extract transactions from the business ledger")
+        assert "OCR processing failed" in final["error"]
         assert final["result"] is None
 
         assert (await c.get(f"{BASE}/{rid}/transactions", headers=headers)).status_code == 409
@@ -480,7 +484,7 @@ async def test_ocr_failure_marks_reconciliation_failed(monkeypatch, public_dns, 
             break
         await asyncio.sleep(0.01)
     assert captured_webhooks[0]["payload"]["event"] == "reconciliation.failed"
-    assert captured_webhooks[0]["payload"]["error"] == "Unable to extract transactions from the business ledger."
+    assert captured_webhooks[0]["payload"]["error"] == final["error"]
 
 
 @pytest.mark.asyncio
@@ -987,3 +991,279 @@ async def test_scanned_european_statement_reconciles_after_correction(monkeypatc
     assert result["balance_check"]["status"] == "passed"
     assert result["balance_check"]["book_to_bank"]["status"] == "passed"
     assert len(result["amount_corrections"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Upload formats, extraction recovery and accuracy (reconciliation audit, Oct 2026)
+# ---------------------------------------------------------------------------
+
+LEDGER_ROWS = [
+    ["Date", "Particulars", "Debit", "Credit"],
+    ["02/10/2026", "ACME Corp invoice 101 receipt", "", "5000.00"],
+    ["03/10/2026", "Rent for October office", "3000.00", ""],
+]
+
+
+def _xlsx_bytes(rows, title_rows=0, sheet_index=0):
+    wb = openpyxl.Workbook()
+    for _ in range(sheet_index):
+        wb.active.append(["cover sheet"])
+        wb.create_sheet("Data")
+        wb.active = len(wb.worksheets) - 1
+    ws = wb.active
+    for i in range(title_rows):
+        ws.append([f"Company report line {i + 1}"])
+    for row in rows:
+        ws.append([c or None for c in row])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("name,content", [
+    ("utf16.csv", "\n".join("\t".join(r) for r in LEDGER_ROWS).encode("utf-16")),
+    ("utf16_nobom.csv", "\n".join("\t".join(r) for r in LEDGER_ROWS).encode("utf-16-le")),
+    ("workbook_saved_as.csv", _xlsx_bytes(LEDGER_ROWS, title_rows=2, sheet_index=1)),
+    ("bank_export.xls", (
+        "<html><body><table>" + "".join(
+            "<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in LEDGER_ROWS
+        ) + "</table></body></html>"
+    ).encode()),
+    ("spreadsheetml.xls", (
+        '<?xml version="1.0"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"><Worksheet><Table>'
+        + "".join("<Row>" + "".join(f'<Cell><Data ss:Type="String" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">{c}</Data></Cell>' for c in r) + "</Row>" for r in LEDGER_ROWS)
+        + "</Table></Worksheet></Workbook>"
+    ).encode()),
+])
+def test_spreadsheet_parsed_by_content_not_extension(name, content):
+    parsed = parse_spreadsheet(content, name)
+    assert [t["description"] for t in parsed["transactions"]] == ["ACME Corp invoice 101 receipt", "Rent for October office"]
+    assert parsed["currency"] is None  # "Particulars" must not be read as the INR symbol "Rs"
+
+
+def test_two_row_header_and_wrapped_narration():
+    rows = [
+        ["Date", "Particulars", "Amount", ""],
+        ["", "", "Debit", "Credit"],
+        ["02/10/2026", "ACME Corp", "", "5000.00"],
+        ["", "invoice 101 receipt", "", ""],
+        ["03/10/2026", "Rent", "3000.00", ""],
+    ]
+    parsed = parse_spreadsheet("\n".join(",".join(r) for r in rows).encode(), "cashbook.csv")
+    assert [(t["description"], t["debit"], t["credit"]) for t in parsed["transactions"]] == [
+        ("ACME Corp invoice 101 receipt", None, "5000.00"), ("Rent", "3000.00", None)]
+
+
+def test_type_column_words_and_signs_set_direction():
+    ledger = {"transactions": [
+        {"date": "2026-10-01", "description": "a", "amount": "500", "type": "Deposit"},
+        {"date": "2026-10-02", "description": "b", "amount": "200", "type": "Check"},
+        {"date": "2026-10-03", "description": "c", "amount": "-75", "type": "Deposit"},  # sign beats a type word
+        {"date": "2026-10-04", "description": "d", "amount": "-60", "type": "CR"},  # explicit marker beats sign
+    ]}
+    bank = {"transactions": [
+        tx("2026-10-01", "a", credit=500), tx("2026-10-02", "b", debit=200),
+        tx("2026-10-03", "c", debit=75), tx("2026-10-04", "d", credit=60),
+    ]}
+    assert reconcile(bank, ledger)["summary"]["matched"] == 4
+
+
+def test_overlong_numbers_and_serial_numbers_do_not_break_reconciliation():
+    from app.services.reconciliation_engine import parse_amount
+    assert parse_amount("1" * 40) == (None, None)
+    bank = {"transactions": [tx("2026-10-01", "Fee", debit=10, ref="1"), tx("2026-10-02", "Card", debit="4" * 35)]}
+    ledger = {"transactions": [tx("2026-10-01", "Other", credit=99, ref="1")]}
+    result = reconcile(bank, ledger)
+    assert result["summary"]["bank_transactions"] == 1
+    assert result["summary"]["amount_mismatches"] == 0  # serial "1" is not a shared reference
+
+
+def test_excel_serial_dates_and_timestamps():
+    from app.services.reconciliation_engine import parse_date
+    assert parse_date(46296).isoformat() == "2026-10-01"
+    assert parse_date("2026-10-01 14:05:00").isoformat() == "2026-10-01"
+    assert parse_date("01/10/2026 09:30 AM").isoformat() == "2026-10-01"
+    assert parse_date(12.5) is None
+
+
+def test_ambiguous_ledger_dates_follow_the_other_document():
+    # Every ledger date has both parts <= 12; only MM/DD lines up with the bank statement.
+    bank = {"transactions": [tx(f"2026-01-{d:02d}", f"Item {d}", debit=d * 10) for d in (2, 5, 9)]}
+    ledger = {"transactions": [tx(f"01/{d:02d}/2026", f"Item {d}", debit=d * 10) for d in (2, 5, 9)]}
+    result = reconcile(bank, ledger)
+    assert result["summary"]["matched"] == 3
+    assert any("ambiguous" in w for w in result["warnings"])
+
+
+def test_running_balance_repairs_swapped_debit_credit_from_ocr():
+    rows, balance = [], 1000
+    for i in range(10):
+        balance -= 10 + i
+        rows.append(tx(f"2026-10-{i + 1:02d}", f"Card {i}", debit=10 + i, balance=balance))
+    rows[4] = tx("2026-10-05", "Card 4", credit=14, balance=rows[4]["balance"])  # AI put it in the wrong column
+    bank = {"opening_balance": 1000, "transactions": rows, "_raw_text": ""}
+    ledger = {"transactions": [tx(r["date"], r["description"], debit=r["debit"] or r["credit"]) for r in rows]}
+    result = reconcile(bank, ledger)
+    assert result["summary"]["matched"] == 10
+    assert result["balance_check"]["running_balance"]["status"] == "passed"
+    fix = next(c for c in result["amount_corrections"] if c["field"] == "direction")
+    assert (fix["transaction_id"], fix["extracted"], fix["corrected"]) == ("B5", "credit", "debit")
+    # Spreadsheets state their columns explicitly and are never "repaired".
+    del bank["_raw_text"]
+    assert reconcile(bank, ledger)["summary"]["matched"] == 9
+
+
+def test_non_overlapping_periods_are_flagged():
+    bank = {"transactions": [tx("2025-01-05", "Rent", debit=100)]}
+    ledger = {"transactions": [tx("2026-09-09", "Invoice", debit=100)]}
+    assert any("do not overlap" in w for w in reconcile(bank, ledger)["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_upload_detects_kind_from_bytes(monkeypatch):
+    async def fake_process_document(self, **kwargs):
+        return ExtractionResponse(id=kwargs["client_request_id"], document_type="bank_statement", raw_text="x",
+                                  extraction={"transactions": [tx("2026-10-01", "NEFT ACME Corp invoice 101", credit=5000.0)]},
+                                  metadata=ProcessingMetadata(pages=1))
+
+    monkeypatch.setattr(ExtractionPipeline, "process_document", fake_process_document)
+    utf16 = "\n".join("\t".join(r) for r in LEDGER_ROWS).encode("utf-16")
+    async with client() as c:
+        resp = await c.post(f"{BASE}/upload", files=files(
+            bank=("statement.csv", make_pdf(1), "text/csv"), ledger=("ledger.csv", utf16, "text/csv")))
+        assert resp.status_code == 202, resp.text
+        record = await MongoDBManager.get_db()["reconciliations"].find_one({"reconciliation_id": resp.json()["reconciliation_id"]})
+        assert record["documents"]["bank_statement"]["kind"] == "pdf"
+        assert record["documents"]["business_ledger"]["kind"] == "spreadsheet"
+
+        garbage = await c.post(f"{BASE}/upload", files=files(ledger=("ledger.csv", b"\x00\x01\x02binary", "text/csv")))
+        assert garbage.status_code == 400 and "not a valid text CSV file" in garbage.json()["error"]
+
+
+def _fake_ocr(extraction, raw_text):
+    async def fake_process_document(self, **kwargs):
+        return ExtractionResponse(id=kwargs["client_request_id"], document_type="bank_statement",
+                                  extraction=extraction, raw_text=raw_text, metadata=ProcessingMetadata(pages=1))
+    return fake_process_document
+
+
+@pytest.mark.asyncio
+async def test_invoice_uploaded_as_ledger_is_reconciled_as_one_entry(monkeypatch):
+    from app.services import reconciliation_ai
+
+    invoice_text = "INVOICE 4121527 SW\nInvoice Date 2026/10/05\nLine 1 SMIRNOFF 272.07\nOrder Total 3,000.00\n"
+    monkeypatch.setattr(ExtractionPipeline, "process_document", _fake_ocr({"transactions": []}, invoice_text))
+
+    async def fake_triage(raw_text, account_holder, client=None):
+        return {"document_kind": "invoice", "currency": None, "invoice": {
+            "number": "4121527 SW", "date": "2026-10-03", "total": "3,000.00", "seller": "Connect Logistics",
+            "buyer": "ACME", "direction": "payable"}}
+
+    monkeypatch.setattr(reconciliation_ai, "triage_document", fake_triage)
+    async with client() as c:
+        body = (await c.post(f"{BASE}/upload", files=files(ledger=("4121527SW.pdf", make_pdf(1), "application/pdf")))).json()
+        final = await wait_for(c, body["reconciliation_id"], {"X-Reconciliation-Token": body["access_token"]})
+    assert final["status"] == "completed", final["error"]
+    result = final["result"]
+    assert result["summary"]["ledger_transactions"] == 1 and result["summary"]["matched"] == 1
+    assert result["matched_transactions"][0]["ledger_transaction"]["reference"] == "4121527 SW"
+    assert any("is an invoice, not a ledger" in w for w in result["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_invoice_total_not_printed_is_rejected(monkeypatch):
+    from app.services import reconciliation_ai
+
+    monkeypatch.setattr(ExtractionPipeline, "process_document", _fake_ocr({"transactions": []}, "INVOICE\nTotal 10.00\n"))
+
+    async def fake_triage(raw_text, account_holder, client=None):
+        return {"document_kind": "invoice", "invoice": {"number": "9", "date": "2026-10-03", "total": "999.00"}}
+
+    monkeypatch.setattr(reconciliation_ai, "triage_document", fake_triage)
+    async with client() as c:
+        body = (await c.post(f"{BASE}/upload", files=files(ledger=("inv.pdf", make_pdf(1), "application/pdf")))).json()
+        final = await wait_for(c, body["reconciliation_id"], {"X-Reconciliation-Token": body["access_token"]})
+    assert final["status"] == "failed"
+    assert final["error"].startswith("Unable to extract transactions from the business ledger: the uploaded file is an invoice")
+
+
+@pytest.mark.asyncio
+async def test_document_without_text_reports_scan_quality(monkeypatch):
+    monkeypatch.setattr(ExtractionPipeline, "process_document", _fake_ocr({"transactions": []}, ""))
+    async with client() as c:
+        body = (await c.post(f"{BASE}/upload", files=files(bank=("scan.pdf", make_pdf(1), "application/pdf")))).json()
+        final = await wait_for(c, body["reconciliation_id"], {"X-Reconciliation-Token": body["access_token"]})
+    assert final["status"] == "failed" and "no readable text" in final["error"]
+
+
+@pytest.mark.asyncio
+async def test_ai_column_mapping_for_unrecognised_headers(monkeypatch):
+    from app.services import reconciliation_ai
+
+    class FakeClient:
+        def is_configured(self):
+            return True
+
+        async def chat_completion(self, messages, **kwargs):
+            return json.dumps({"sheet": 0, "header_row": 0, "columns": {
+                "date": 0, "description": 1, "debit": 2, "credit": 3, "balance": 99}})
+
+    preview = [[["Wann", "Was", "Raus", "Rein"], ["01/10/2026", "x", "1", ""]]]
+    hint = await reconciliation_ai.map_spreadsheet_columns(preview, FakeClient())
+    assert hint == {"sheet": 0, "header_row": 0, "columns": {"date": 0, "description": 1, "debit": 2, "credit": 3}}
+
+    async def fake_map(preview, client=None):
+        return hint
+
+    monkeypatch.setattr(reconciliation_ai, "map_spreadsheet_columns", fake_map)
+    ledger = "Wann,Was,Raus,Rein\n02/10/2026,ACME Corp invoice 101 receipt,,5000.00\n03/10/2026,Rent,3000.00,\n"
+    async with client() as c:
+        body = (await c.post(f"{BASE}/upload", files=files(ledger=("odd.csv", ledger.encode(), "text/csv")))).json()
+        final = await wait_for(c, body["reconciliation_id"], {"X-Reconciliation-Token": body["access_token"]})
+    assert final["status"] == "completed" and final["result"]["summary"]["matched"] == 2
+
+
+def test_statement_text_split_keeps_transactions_whole():
+    from app.services.extractor import split_statement_text
+    text = "Header\n" + "".join(f"01/{d % 28 + 1:02d}/2025\nPOS DEBIT SHOP {d}\n-{d}.00\n{1000 - d}.00\n" for d in range(400))
+    segments = split_statement_text(text, 2000)
+    assert "".join(segments) == text and len(segments) > 5
+    assert all(seg.startswith(("Header", "01/")) for seg in segments)
+
+
+@pytest.mark.asyncio
+async def test_truncated_ai_statement_is_re_extracted_in_halves():
+    from unittest.mock import AsyncMock, patch
+    from app.schemas.ocr import DocumentTypeEnum
+    from app.services.extractor import StructuredExtractor
+
+    text = "".join(f"01/{d % 28 + 1:02d}/2025 SHOP {d} -{d}.00\n" for d in range(150))
+    calls = []
+
+    async def fake_chat(messages, **kwargs):
+        body = messages[1]["content"]
+        calls.append(len(body))
+        if len(calls) == 1:
+            return '{"transactions": [{"date": "2025-01-01", "description": "SHOP 0", "debit": 0.5'  # cut off
+        n = body.count("SHOP")
+        return json.dumps({"transactions": [{"date": "2025-01-01", "description": "s", "debit": 1.0}] * n})
+
+    client_ = DeepSeekClient(api_key="mock_key")
+    with patch.object(client_, "chat_completion", new=AsyncMock(side_effect=fake_chat)), \
+            patch.object(client_, "is_configured", return_value=True):
+        result, _ = await StructuredExtractor(client_).extract(text, DocumentTypeEnum.BANK_STATEMENT.value)
+    assert len(calls) >= 3 and all(n < calls[0] for n in calls[1:])  # truncated once, then smaller requests
+    assert len(result["transactions"]) == 150
+
+
+def test_ocr_paddle_v3_output_and_row_grouping():
+    from app.schemas.ocr import OCRLine
+    from app.services.ocr_service import OCRService
+
+    v3 = [{"rec_texts": ["01/12/2025", "SPOTIFY", "-11.34"], "rec_scores": [0.99, 0.98, 0.97],
+           "rec_polys": [[[0, 0], [50, 0], [50, 10], [0, 10]], [[60, 0], [120, 0], [120, 10], [60, 10]],
+                         [[130, 1], [160, 1], [160, 11], [130, 11]]]}]
+    lines = OCRService._paddle_lines(v3)
+    assert [l[0] for l in lines] == ["01/12/2025", "SPOTIFY", "-11.34"]
+    ocr_lines = [OCRLine(text=t, confidence=c, bbox=b) for t, c, b in lines]
+    assert OCRService._row_texts(OCRService._sort_lines_reading_order(ocr_lines)) == ["01/12/2025   SPOTIFY   -11.34"]

@@ -115,7 +115,7 @@ def require_completed(record: Dict[str, Any]) -> None:
     status_code=status.HTTP_202_ACCEPTED,
     summary="Upload bank statement + business ledger and start reconciliation (HTTP 202)",
     description=(
-        "Accepts a bank statement and a business ledger (PDF, JPG, PNG, WEBP, TIFF, CSV or XLSX), queues OCR "
+        "Accepts a bank statement and a business ledger (PDF, JPG, PNG, WEBP, TIFF, CSV, XLSX or XLS), queues OCR "
         "extraction for each document on the background workers, and returns a `reconciliation_id` immediately.\n\n"
         "- **Authenticated** (`X-API-Key` / `Authorization: Bearer`): the reconciliation is owned by your key.\n"
         "- **Guest** (no key): an `access_token` is returned **once**; send it as `X-Reconciliation-Token` on later calls.\n\n"
@@ -125,8 +125,8 @@ def require_completed(record: Dict[str, Any]) -> None:
     dependencies=[Depends(check_rate_limit)],
 )
 async def upload_reconciliation(
-    bank_statement: UploadFile = File(..., description="Bank statement: PDF (up to 200 pages), image, CSV or XLSX"),
-    business_ledger: UploadFile = File(..., description="Business ledger / cash book: PDF, image, CSV or XLSX"),
+    bank_statement: UploadFile = File(..., description="Bank statement: PDF (up to 200 pages), image, CSV, XLSX or XLS"),
+    business_ledger: UploadFile = File(..., description="Business ledger / cash book: PDF, image, CSV, XLSX or XLS"),
     webhook_url: Optional[str] = Form(default=None, description="HTTPS endpoint for completion/failure notifications"),
     webhook_secret: Optional[str] = Form(default=None, description="Secret for HMAC-SHA256 payload signatures"),
     date_tolerance_days: int = Form(default=2, ge=0, le=31, description="Max days between matching bank and ledger dates"),

@@ -71,7 +71,18 @@ The same four endpoints serve both kinds of caller.
 |---|---|---|
 | PDF (digital or scanned) | `.pdf` | Existing OCR pipeline, as a background job |
 | Images | `.jpg` `.jpeg` `.png` `.webp` `.tiff` `.tif` | Existing OCR pipeline, as a background job |
-| Spreadsheets | `.csv` `.xlsx` | Parsed directly (no OCR) |
+| Spreadsheets | `.csv` `.tsv` `.txt` `.xlsx` `.xlsm` `.xls` | Parsed directly (no OCR) |
+
+The file type is detected from the file's bytes, not its name: a PDF or image saved as `.csv` goes through OCR,
+an `.xlsx` saved as `.csv` is read as a workbook, and UTF-16 "Unicode text" exports plus the HTML / XML
+"Excel" files many banks produce are read as spreadsheets. Every sheet is searched for the transaction header
+(including headers split over two rows); if no header is recognised by name, DeepSeek maps the columns and the
+values are still parsed deterministically. Scanned pages use PaddleOCR, falling back to the bundled RapidOCR models.
+
+If a PDF/image yields no transactions, DeepSeek checks what the document is: statements and ledgers get a second,
+segmented extraction pass; an invoice or receipt uploaded as the **business ledger** is reconciled as one entry for
+its printed total (with a warning); anything else fails with a specific reason after the usual
+`Unable to extract transactions from the <bank statement|business ledger>: ` prefix.
 
 | Limit | Default | Setting |
 |---|---|---|

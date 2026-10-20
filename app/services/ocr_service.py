@@ -1,9 +1,11 @@
 """
 OCR Service implementing PaddleOCR with non-blocking async execution and reading-order sorting.
+Falls back to RapidOCR (ONNX runtime, bundled models) when PaddleOCR or its paddlepaddle runtime is unavailable.
 """
 
 import asyncio
 import logging
+import threading
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
@@ -19,6 +21,9 @@ class OCRService:
 
     _instances: Dict[str, object] = {}
     _lock = asyncio.Lock()
+    _rapid_engine: Optional[object] = None
+    _rapid_unavailable = False
+    _rapid_lock = threading.Lock()
 
     @classmethod
     def _get_engine(cls, lang: str = "en"):
@@ -85,31 +90,17 @@ class OCRService:
 
         if engine is not None:
             try:
-                # PaddleOCR predict
-                result = engine.ocr(preprocessed)
-                if result and len(result) > 0 and result[0] is not None:
-                    for item in result[0]:
-                        if len(item) >= 2:
-                            bbox = item[0]  # list of 4 points [[x1,y1], [x2,y2], ...]
-                            text_info = item[1]  # (text, confidence)
-                            if isinstance(text_info, (tuple, list)) and len(text_info) >= 2:
-                                text = str(text_info[0]).strip()
-                                conf = float(text_info[1])
-                            else:
-                                text = str(text_info).strip()
-                                conf = 0.90
-
-                            if text:
-                                ocr_lines.append(
-                                    OCRLine(
-                                        text=text,
-                                        confidence=round(conf, 4),
-                                        bbox=bbox if isinstance(bbox, list) else None,
-                                    )
-                                )
-                                confidences.append(conf)
+                for text, conf, bbox in cls._paddle_lines(engine.ocr(preprocessed)):
+                    ocr_lines.append(OCRLine(text=text, confidence=round(conf, 4), bbox=bbox))
+                    confidences.append(conf)
             except Exception as e:
                 logger.error(f"PaddleOCR execution error on page {page_number}: {e}")
+
+        # PaddleOCR missing (e.g. no paddlepaddle runtime) or empty: use RapidOCR on the original image
+        if not ocr_lines:
+            for text, conf, bbox in cls._rapid_lines(image_bytes, page_number):
+                ocr_lines.append(OCRLine(text=text, confidence=round(conf, 4), bbox=bbox))
+                confidences.append(conf)
 
         # If engine was None or returned 0 lines, try PyMuPDF fallback
         if not ocr_lines:
@@ -123,7 +114,8 @@ class OCRService:
 
         # Sort OCR lines according to natural geometric reading order
         sorted_lines = cls._sort_lines_reading_order(ocr_lines)
-        full_text_lines = [l.text for l in sorted_lines]
+        # One output line per visual row keeps table cells (date, description, amounts) together for extraction.
+        full_text_lines = cls._row_texts(sorted_lines)
 
         avg_confidence = float(np.mean(confidences)) if confidences else (1.0 if not is_scanned else 0.0)
         combined_text = "\n".join(full_text_lines)
@@ -135,6 +127,85 @@ class OCRService:
             lines=sorted_lines,
             is_scanned=is_scanned,
         )
+
+    @staticmethod
+    def _paddle_lines(result) -> List[Tuple[str, float, Optional[list]]]:
+        """Normalizes PaddleOCR 2.x ([[bbox, (text, conf)], ...]) and 3.x ({rec_texts, rec_scores, rec_polys}) output."""
+        lines: List[Tuple[str, float, Optional[list]]] = []
+        if not result or result[0] is None:
+            return lines
+        page = result[0]
+        if hasattr(page, "get") and page.get("rec_texts") is not None:
+            polys = page.get("rec_polys")
+            polys = [] if polys is None else polys
+            for i, (text, conf) in enumerate(zip(page.get("rec_texts") or [], page.get("rec_scores") or [])):
+                bbox = np.asarray(polys[i]).tolist() if i < len(polys) else None
+                if str(text).strip():
+                    lines.append((str(text).strip(), float(conf), bbox))
+            return lines
+        for item in page:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            bbox, text_info = item[0], item[1]
+            if isinstance(text_info, (tuple, list)) and len(text_info) >= 2:
+                text, conf = str(text_info[0]).strip(), float(text_info[1])
+            else:
+                text, conf = str(text_info).strip(), 0.90
+            if text:
+                lines.append((text, conf, bbox if isinstance(bbox, list) else None))
+        return lines
+
+    @classmethod
+    def _get_rapid_engine(cls):
+        if cls._rapid_engine is None and not cls._rapid_unavailable:
+            with cls._rapid_lock:
+                if cls._rapid_engine is None and not cls._rapid_unavailable:
+                    try:
+                        from rapidocr import RapidOCR
+
+                        cls._rapid_engine = RapidOCR()
+                        logger.info("RapidOCR fallback engine initialized.")
+                    except Exception as e:
+                        cls._rapid_unavailable = True
+                        logger.warning(f"RapidOCR fallback unavailable: {e}")
+        return cls._rapid_engine
+
+    @classmethod
+    def _rapid_lines(cls, image_bytes: bytes, page_number: int) -> List[Tuple[str, float, Optional[list]]]:
+        engine = cls._get_rapid_engine()
+        if engine is None:
+            return []
+        try:
+            out = engine(image_bytes)
+        except Exception as e:
+            logger.error(f"RapidOCR execution error on page {page_number}: {e}")
+            return []
+        texts, scores = getattr(out, "txts", None) or (), getattr(out, "scores", None) or ()
+        boxes = getattr(out, "boxes", None)
+        lines = []
+        for i, (text, conf) in enumerate(zip(texts, scores)):
+            bbox = np.asarray(boxes[i]).tolist() if boxes is not None and i < len(boxes) else None
+            if str(text).strip():
+                lines.append((str(text).strip(), float(conf), bbox))
+        return lines
+
+    @staticmethod
+    def _row_texts(sorted_lines: List[OCRLine]) -> List[str]:
+        """Joins reading-ordered lines that share a visual row with a column gap; lines without boxes stay as-is."""
+        if any(not l.bbox or len(l.bbox) < 4 for l in sorted_lines):
+            return [l.text for l in sorted_lines]
+        rows: List[List[OCRLine]] = []
+        last_y = None
+        heights = [max(np.ptp(np.array(l.bbox)[:, 1]), 1.0) for l in sorted_lines]
+        threshold = max(float(np.median(heights)) * 0.6, 10.0) if heights else 10.0
+        for line in sorted_lines:
+            y = float(np.mean(np.array(line.bbox)[:, 1]))
+            if rows and last_y is not None and abs(y - last_y) < threshold:
+                rows[-1].append(line)
+            else:
+                rows.append([line])
+                last_y = y
+        return ["   ".join(l.text for l in row) for row in rows]
 
     @staticmethod
     def _sort_lines_reading_order(lines: List[OCRLine]) -> List[OCRLine]:

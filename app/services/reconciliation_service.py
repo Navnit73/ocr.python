@@ -30,18 +30,21 @@ from app.db.repositories.reconciliation_repo import ReconciliationRepository
 from app.services.export_service import sanitize_for_formula_injection
 from app.services.file_validator import FileValidator
 from app.services.pdf_service import PDFService
+from app.services import reconciliation_ai
 from app.services.reconciliation_engine import (
     ReconciliationError,
     ReconciliationOptions,
     parse_spreadsheet,
     reconcile,
+    sniff_spreadsheet,
+    spreadsheet_preview,
 )
 from app.services.storage_service import StorageService
 from app.services.webhook_service import WebhookService
 
 logger = logging.getLogger("reconciliation")
 
-SPREADSHEET_EXTENSIONS = (".csv", ".xlsx")
+SPREADSHEET_EXTENSIONS = (".csv", ".tsv", ".txt", ".xlsx", ".xlsm", ".xls")
 ROLES = ("bank_statement", "business_ledger")
 ROLE_LABELS = {"bank_statement": "bank statement", "business_ledger": "business ledger"}
 
@@ -110,49 +113,67 @@ class ReconciliationService:
         finally:
             doc.close()
 
+    @staticmethod
+    def _media_kind(content: bytes) -> Optional[str]:
+        """'pdf' / 'image' when the bytes carry a PDF or image signature, whatever the file is called."""
+        try:
+            return FileValidator.detect_category_from_bytes(content, "")
+        except HTTPException:
+            return None
+
     @classmethod
     async def validate_document(cls, upload: UploadFile, role: str, password: Optional[str] = None) -> Tuple[str, bytes]:
         """
         Returns (kind, bytes) where kind is 'pdf', 'image' or 'spreadsheet'. A password-protected PDF
-        is unlocked with `password` and its unencrypted bytes are returned.
+        is unlocked with `password` and its unencrypted bytes are returned. The kind is decided from the
+        file's bytes, so a PDF or workbook saved under the wrong extension is still processed correctly.
         """
         settings = get_settings()
         label = ROLE_LABELS[role]
         filename = upload.filename or ""
         ext = os.path.splitext(filename.lower())[1]
-        if ext not in SPREADSHEET_EXTENSIONS:
-            if ext not in settings.allowed_extensions:
-                allowed = ", ".join(list(settings.allowed_extensions) + list(SPREADSHEET_EXTENSIONS))
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Unsupported {label} file type '{ext or 'none'}'. Allowed: {allowed}",
-                )
-            try:
-                kind, content = await FileValidator.validate_upload(upload)
-                if kind == "pdf":
-                    try:
-                        content = await asyncio.to_thread(cls.unlock_pdf, content, password)
-                    except ValueError as e:
-                        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-                    # Rejects PDFs above MAX_PDF_PAGES (and any still locked) before any job is queued.
-                    await PDFService.get_pdf_page_count_async(content)
-            except HTTPException as e:
-                detail = str(e.detail)
-                if "password" in detail.lower() and detail not in (PDF_PASSWORD_REQUIRED, PDF_PASSWORD_INCORRECT):
-                    detail = PDF_PASSWORD_REQUIRED
-                raise HTTPException(status_code=e.status_code, detail=f"{label.capitalize()}: {detail}")
-            return kind, content
-
+        if ext not in SPREADSHEET_EXTENSIONS and ext not in settings.allowed_extensions:
+            allowed = ", ".join(list(settings.allowed_extensions) + list(SPREADSHEET_EXTENSIONS))
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported {label} file type '{ext or 'none'}'. Allowed: {allowed}",
+            )
         content = await upload.read()
         try:
             FileValidator.validate_bytes_and_size(content, filename)
         except HTTPException as e:
             raise HTTPException(status_code=e.status_code, detail=f"{label.capitalize()}: {e.detail}")
-        if ext == ".xlsx" and not content.startswith(b"PK\x03\x04"):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"The {label} is not a valid .xlsx file.")
-        if ext == ".csv" and (b"\x00" in content[:8192] or content.startswith((b"%PDF", b"PK\x03\x04"))):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"The {label} is not a valid text CSV file.")
-        return "spreadsheet", content
+
+        media_kind = cls._media_kind(content)
+        if ext in SPREADSHEET_EXTENSIONS and media_kind is None:
+            if sniff_spreadsheet(content) is None:
+                expected = "Excel" if ext in (".xlsx", ".xlsm", ".xls") else "text CSV"
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"The {label} is not a valid {expected} file. "
+                        "Upload a CSV, Excel (.xlsx/.xls), PDF or image file."
+                    ),
+                )
+            return "spreadsheet", content
+
+        try:
+            # Without a signature this falls back to Pillow for image extensions, else raises the standard
+            # "does not match its declared format" error.
+            kind = media_kind or FileValidator.detect_category_from_bytes(content, filename)
+            if kind == "pdf":
+                try:
+                    content = await asyncio.to_thread(cls.unlock_pdf, content, password)
+                except ValueError as e:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+                # Rejects PDFs above MAX_PDF_PAGES (and any still locked) before any job is queued.
+                await PDFService.get_pdf_page_count_async(content)
+        except HTTPException as e:
+            detail = str(e.detail)
+            if "password" in detail.lower() and detail not in (PDF_PASSWORD_REQUIRED, PDF_PASSWORD_INCORRECT):
+                detail = PDF_PASSWORD_REQUIRED
+            raise HTTPException(status_code=e.status_code, detail=f"{label.capitalize()}: {detail}")
+        return kind, content
 
     @classmethod
     def validate_webhook_url(cls, url: str) -> str:
@@ -342,9 +363,12 @@ class ReconciliationService:
 
         try:
             statements: Dict[str, Dict[str, Any]] = {}
+            notes: List[str] = []
             jobs = await cls._load_jobs(record, include_result=True)
             for role in ROLES:
-                statements[role] = await cls._load_statement(record["documents"][role], jobs, role)
+                holder = (statements.get("bank_statement") or {}).get("account_holder")
+                statements[role], role_notes = await cls._load_statement(record["documents"][role], jobs, role, holder)
+                notes += role_notes
             opts = record.get("options") or {}
             options = ReconciliationOptions(
                 date_tolerance_days=int(opts.get("date_tolerance_days", 2)),
@@ -353,6 +377,7 @@ class ReconciliationService:
             result = await asyncio.to_thread(
                 reconcile, statements["bank_statement"], statements["business_ledger"], options
             )
+            result["warnings"] = notes + result["warnings"]
         except ReconciliationError as e:
             await cls._finish_failed(record, str(e), await_webhook)
             return
@@ -424,34 +449,124 @@ class ReconciliationService:
         job_ids = [d["job_id"] for d in record.get("documents", {}).values() if d.get("job_id")]
         if not job_ids:
             return {}
-        projection = {"_id": 0, "job_id": 1, "status": 1, "progress": 1}
+        projection = {"_id": 0, "job_id": 1, "status": 1, "progress": 1, "error": 1}
         if include_result:
             projection.update({"result.extraction": 1, "result.status": 1, "result.raw_text": 1})
         cursor = JobRepository._collection().find({"job_id": {"$in": job_ids}}, projection)
         return {j["job_id"]: j for j in await cursor.to_list(length=len(job_ids))}
 
     @classmethod
-    async def _load_statement(cls, doc: Dict[str, Any], jobs: Dict[str, Dict[str, Any]], role: str) -> Dict[str, Any]:
+    async def _load_statement(
+        cls,
+        doc: Dict[str, Any],
+        jobs: Dict[str, Dict[str, Any]],
+        role: str,
+        account_holder: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        """Returns (statement_data, report_notes) for one uploaded document, or raises ReconciliationError."""
         label = ROLE_LABELS[role]
+        failure = f"Unable to extract transactions from the {label}"
         if doc["kind"] == "spreadsheet":
+            return await cls._load_spreadsheet(doc, label, failure), []
+
+        job = jobs.get(doc["job_id"]) or {}
+        if job.get("status") != "completed":
+            error = str(job.get("error") or "").lower()
+            if "password" in error or "encrypt" in error:
+                raise ReconciliationError(f"{failure}: the PDF is password-protected.")
+            raise ReconciliationError(f"{failure}: the document could not be read (OCR processing failed).")
+        result = job.get("result") or {}
+        data = dict(result.get("extraction") or {})
+        raw_text = result.get("raw_text") or ""
+        # Printed text lets the engine catch amounts misread with the wrong decimal separator.
+        data["_raw_text"] = raw_text
+        if data.get("transactions"):
+            return data, []
+        if not raw_text.strip():
+            raise ReconciliationError(
+                f"{failure}: no readable text was found. If it is a scanned document or photo, "
+                "upload a sharper, upright scan (at least 200 DPI)."
+            )
+        recovered, notes = await cls._recover_statement(raw_text, role, label, account_holder)
+        recovered["_raw_text"] = raw_text
+        return recovered, notes
+
+    @classmethod
+    async def _load_spreadsheet(cls, doc: Dict[str, Any], label: str, failure: str) -> Dict[str, Any]:
+        try:
+            content = await StorageService.read_file(doc["file_reference"])
+        except FileNotFoundError:
+            raise ReconciliationError(f"The uploaded {label} is no longer available.")
+        try:
+            data = await asyncio.to_thread(parse_spreadsheet, content, doc["filename"])
+        except ReconciliationError as e:
+            if not str(e).startswith("Could not find a header row"):
+                raise ReconciliationError(f"{failure}: {e}")
+            # Headers in an unfamiliar language/wording: let DeepSeek locate the columns, then parse deterministically.
             try:
-                content = await StorageService.read_file(doc["file_reference"])
-                data = await asyncio.to_thread(parse_spreadsheet, content, doc["filename"])
-            except ReconciliationError as e:
-                raise ReconciliationError(f"Unable to extract transactions from the {label}: {e}")
-            except FileNotFoundError:
-                raise ReconciliationError(f"The uploaded {label} is no longer available.")
-        else:
-            job = jobs.get(doc["job_id"]) or {}
-            if job.get("status") != "completed":
-                raise ReconciliationError(f"Unable to extract transactions from the {label}.")
-            result = job.get("result") or {}
-            data = dict(result.get("extraction") or {})
-            # Printed text lets the engine catch amounts misread with the wrong decimal separator.
-            data["_raw_text"] = result.get("raw_text") or ""
+                preview = await asyncio.to_thread(spreadsheet_preview, content)
+                hint = await reconciliation_ai.map_spreadsheet_columns(preview)
+            except Exception as ai_error:
+                logger.warning(f"AI column mapping failed: {type(ai_error).__name__}")
+                hint = None
+            if not hint:
+                raise ReconciliationError(f"{failure}: {e}")
+            try:
+                data = await asyncio.to_thread(parse_spreadsheet, content, doc["filename"], hint)
+            except ReconciliationError as e2:
+                raise ReconciliationError(f"{failure}: {e2}")
         if not data.get("transactions"):
-            raise ReconciliationError(f"Unable to extract transactions from the {label}.")
+            raise ReconciliationError(f"{failure}: the spreadsheet has a header row but no transaction rows.")
         return data
+
+    @classmethod
+    async def _recover_statement(
+        cls,
+        raw_text: str,
+        role: str,
+        label: str,
+        account_holder: Optional[str],
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        """
+        Text was read but the OCR job's extraction found no transactions. DeepSeek triages the document:
+        statements/ledgers get a second, segmented extraction pass; an invoice or receipt uploaded as the
+        ledger becomes one entry for its printed total. Anything else fails with a specific reason.
+        """
+        failure = f"Unable to extract transactions from the {label}"
+        try:
+            triage = await reconciliation_ai.triage_document(raw_text, account_holder)
+        except Exception as e:
+            logger.warning(f"Document triage failed: {type(e).__name__}")
+            triage = None
+        if triage is None:
+            raise ReconciliationError(f"{failure}: no transaction table was found in the document.")
+
+        kind = triage["document_kind"]
+        if kind in ("bank_statement", "ledger"):
+            try:
+                data = await reconciliation_ai.reextract_transactions(raw_text)
+            except Exception as e:
+                logger.warning(f"Transaction re-extraction failed: {type(e).__name__}")
+                data = None
+            if data:
+                return data, []
+            raise ReconciliationError(f"{failure}: no transaction rows could be read from the document.")
+        if kind in ("invoice", "receipt"):
+            if role == "bank_statement":
+                raise ReconciliationError(
+                    f"{failure}: the uploaded file is {'an' if kind == 'invoice' else 'a'} {kind}, not a bank statement."
+                )
+            data, notes = reconciliation_ai.invoice_as_ledger(triage, raw_text, label)
+            if data:
+                return data, notes
+            raise ReconciliationError(
+                f"{failure}: the uploaded file is {'an' if kind == 'invoice' else 'a'} {kind}, not a ledger, "
+                "and its total could not be read reliably."
+            )
+        raise ReconciliationError(
+            f"{failure}: the uploaded file does not look like a bank statement or ledger"
+            f"{' (' + str(triage.get('reason'))[:160] + ')' if triage.get('reason') else ''}."
+        )
 
     # ------------------------------------------------------------------
     # Webhooks

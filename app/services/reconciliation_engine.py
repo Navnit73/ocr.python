@@ -5,10 +5,10 @@ and reports unmatched entries, possible duplicates, amount/direction mismatches 
 All monetary arithmetic uses Decimal. No AI is involved.
 """
 
+import codecs
 import csv
 import io
 from bisect import bisect_left, bisect_right
-import os
 import re
 import unicodedata
 from collections import defaultdict
@@ -16,6 +16,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from html.parser import HTMLParser
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 CENT = Decimal("0.01")
@@ -47,6 +48,7 @@ _CURRENCY_SYMBOLS = {
     "₽": "RUB", "₱": "PHP", "₦": "NGN", "฿": "THB", "₫": "VND", "₪": "ILS", "₴": "UAH", "₸": "KZT",
     "ZŁ": "PLN", "KČ": "CZK", "FT": "HUF", "RM": "MYR", "CN¥": "CNY", "JP¥": "JPY", "RMB": "CNY",
 }
+_SYMBOLS_LONGEST_FIRST = sorted(_CURRENCY_SYMBOLS, key=len, reverse=True)
 AMBIGUOUS_CURRENCY_SYMBOLS = frozenset({"$", "¥", "KR", "KR.", "R", "FR", "LEI"})
 _SYMBOL_CHARS = re.compile(r"[$£€₹₨₩₺₽₱₦฿₫₪₴₸¥]")
 
@@ -212,52 +214,80 @@ def parse_amount(value: Any, decimal_comma: Optional[bool] = None) -> Tuple[Opti
             return None, None
         if negative:
             d = -abs(d)
-        if not d.is_finite():
-            return None, None
-        return d.quantize(_QUANTUM.get(), rounding=ROUND_HALF_UP), marker
+        return _quantize(d), marker
+    return _quantize(d), None
+
+
+def _quantize(d: Decimal) -> Optional[Decimal]:
+    """Rounds to the currency quantum; None for NaN/inf or numbers too long to be an amount (IDs, phone numbers)."""
     if not d.is_finite():
-        return None, None
-    return d.quantize(_QUANTUM.get(), rounding=ROUND_HALF_UP), None
+        return None
+    try:
+        return d.quantize(_QUANTUM.get(), rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        return None
 
 
 _DATE_FORMATS = (
     "%Y-%m-%d", "%Y/%m/%d",
     "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%y", "%d-%m-%y", "%d.%m.%y",
     "%d %b %Y", "%d-%b-%Y", "%d %B %Y", "%d-%B-%Y", "%d %b %y", "%d-%b-%y", "%d/%b/%Y",
-    "%b %d, %Y", "%B %d, %Y", "%b %d %Y",
+    "%b %d, %Y", "%B %d, %Y", "%b %d %Y", "%B %d %Y", "%d %b, %Y", "%d %B, %Y", "%Y.%m.%d",
     "%m/%d/%Y",  # month-first only as a last resort (e.g. 12/31/2026)
 )
 
 
 _NUMERIC_DATE = re.compile(r"^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2}|\d{4})$")
+_TRAILING_TIME = re.compile(r"[ T]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?\s*([AaPp][Mm])?$")
+# Excel serial day numbers for 1954-10-04 .. 2119-01-08; spreadsheet cells without date formatting arrive as these.
+_EXCEL_SERIAL_RANGE = (20000, 80000)
+_EXCEL_EPOCH = date(1899, 12, 30)
 
 
-def detect_month_first(values: Iterable[Any]) -> bool:
-    """True when a document's numeric dates are clearly MM/DD (some middle part > 12, no first part > 12)."""
+def detect_date_order(values: Iterable[Any]) -> Optional[bool]:
+    """
+    Day/month order of a document's numeric dates: True = MM/DD, False = DD/MM,
+    None = no evidence either way (every numeric date has both parts <= 12, or there are none).
+    """
     day_first = month_first = False
     for v in values:
         if v is None or isinstance(v, (date, datetime)):
             continue
-        m = _NUMERIC_DATE.match(str(v).strip())
+        m = _NUMERIC_DATE.match(_TRAILING_TIME.sub("", str(v).strip()))
         if not m:
             continue
         first, second = int(m.group(1)), int(m.group(2))
         day_first |= first > 12
         month_first |= second > 12
-    return month_first and not day_first
+    if month_first and not day_first:
+        return True
+    if day_first:
+        return False
+    return None
+
+
+def detect_month_first(values: Iterable[Any]) -> bool:
+    """True when a document's numeric dates are clearly MM/DD (some middle part > 12, no first part > 12)."""
+    return detect_date_order(values) is True
 
 
 def parse_date(value: Any, month_first: bool = False) -> Optional[date]:
     """Parses common statement date formats, preferring day-first for ambiguous dates unless month_first."""
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
+    if isinstance(value, (int, float)):
+        if _EXCEL_SERIAL_RANGE[0] <= value <= _EXCEL_SERIAL_RANGE[1]:
+            return _EXCEL_EPOCH + timedelta(days=int(value))
+        return None
     s = re.sub(r"\s+", " ", str(value).strip())
     if not s:
         return None
+    if not re.match(r"^\d{4}-\d{2}-\d{2}T", s):
+        s = _TRAILING_TIME.sub("", s).strip()
     if re.match(r"^\d{4}-\d{2}-\d{2}([ T].*)?$", s):
         try:
             return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
@@ -304,7 +334,7 @@ def _references_match(a: str, b: str) -> bool:
     if not a or not b:
         return False
     if a == b:
-        return True
+        return len(a) >= 3 or not a.isdigit()  # row serials like "1".."99" are not references
     shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
     return len(shorter) >= 6 and shorter in longer
 
@@ -332,8 +362,10 @@ def detect_currency_in_text(text: Any) -> Tuple[Optional[str], bool]:
     marker = re.sub(r"[\d\s.,'()\-+−]", "", text).upper()
     if not marker:
         return None, False
-    for symbol in sorted(_CURRENCY_SYMBOLS, key=len, reverse=True):
-        if symbol in marker:
+    upper = text.upper()
+    for symbol in _SYMBOLS_LONGEST_FIRST:
+        # Letter symbols must stand alone: "Rs 500" is INR, the header "Particulars" is not.
+        if re.search(rf"(?<![A-Z]){re.escape(symbol)}(?![A-Z])", upper):
             return _CURRENCY_SYMBOLS[symbol], False
     ambiguous = marker in AMBIGUOUS_CURRENCY_SYMBOLS or bool(_SYMBOL_CHARS.search(marker))
     return None, ambiguous
@@ -490,12 +522,43 @@ def document_decimal_comma(data: Dict[str, Any]) -> Optional[bool]:
     return detect_decimal_comma(values)
 
 
+# Values of a Dr/Cr ("type") column. Explicit side markers win over an amount's sign; descriptive
+# transaction types (QuickBooks "Check" / "Deposit", ...) only decide when the amount is unsigned.
+_EXPLICIT_DEBIT = frozenset({"d", "dr", "db", "debit", "debit entry", "s", "soll", "af", "debe", "debito", "cargo"})
+_EXPLICIT_CREDIT = frozenset({"c", "cr", "credit", "credit entry", "h", "haben", "bij", "haber", "credito", "abono"})
+_DEBIT_WORDS = ("withdraw", "payment", "paid", "check", "cheque", "chq", "bill pmt", "purchase", "expense", "fee",
+                "charge", "pos", "atm", "transfer out", "debit", "outgoing")
+_CREDIT_WORDS = ("deposit", "receipt", "received", "refund", "interest", "income", "transfer in", "credit",
+                 "salary", "payroll", "incoming")
+
+
+def _type_direction(value: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Returns (explicit_side, descriptive_side) for a type/Dr-Cr cell; each is 'debit', 'credit' or None."""
+    text = re.sub(r"[^a-z ]+", " ", str(value or "").lower()).strip()
+    text = re.sub(r"\s+", " ", text)
+    if not text:
+        return None, None
+    if text in _EXPLICIT_DEBIT:
+        return "debit", None
+    if text in _EXPLICIT_CREDIT:
+        return "credit", None
+    if text.startswith(_DEBIT_WORDS):
+        return None, "debit"
+    if text.startswith(_CREDIT_WORDS):
+        return None, "credit"
+    return None, None
+
+
 def normalize_transactions(
     raw_transactions: Iterable[Dict[str, Any]],
     source: str,
     decimal_comma: Optional[bool] = None,
+    month_first: Optional[bool] = None,
 ) -> Tuple[List[NormalizedTransaction], List[str]]:
-    """Builds normalized transactions without mutating the extracted originals."""
+    """
+    Builds normalized transactions without mutating the extracted originals.
+    month_first: day/month order for ambiguous numeric dates; None detects it from this document alone.
+    """
     prefix = "B" if source == "bank" else "L"
     label = "bank statement" if source == "bank" else "business ledger"
     raw_transactions = list(raw_transactions)
@@ -503,7 +566,8 @@ def normalize_transactions(
     skipped_no_amount = 0
     both_sides = 0
     unparsed_dates = 0
-    month_first = detect_month_first(tx.get("date") for tx in raw_transactions if isinstance(tx, dict))
+    if month_first is None:
+        month_first = detect_month_first(tx.get("date") for tx in raw_transactions if isinstance(tx, dict))
 
     for row, tx in enumerate(raw_transactions, start=1):
         if not isinstance(tx, dict):
@@ -513,9 +577,12 @@ def normalize_transactions(
         credit = to_decimal(tx.get("credit"), decimal_comma)
         if debit is None and credit is None and tx.get("amount") is not None:
             amount, marker = parse_amount(tx.get("amount"), decimal_comma)
-            tx_type = str(tx.get("type") or marker or "").strip().lower()
             if amount is not None:
-                if tx_type.startswith(("d", "w")) or (not tx_type and amount < 0):
+                explicit, descriptive = _type_direction(tx.get("type"))
+                side = explicit or {"dr": "debit", "cr": "credit"}.get(marker)
+                if side is None:
+                    side = "debit" if amount < 0 else (descriptive or "credit")
+                if side == "debit":
                     debit = abs(amount)
                 else:
                     credit = abs(amount)
@@ -554,7 +621,10 @@ def normalize_transactions(
         )
 
     warnings: List[str] = []
-    if month_first:
+    if month_first and any(
+        isinstance(tx, dict) and _NUMERIC_DATE.match(_TRAILING_TIME.sub("", str(tx.get("date") or "").strip()))
+        for tx in raw_transactions
+    ):
         warnings.append(f"{label.capitalize()} dates were interpreted as month-first (MM/DD/YYYY).")
     if skipped_no_amount:
         warnings.append(f"{skipped_no_amount} {label} row(s) had no usable debit/credit amount and were not reconciled.")
@@ -881,6 +951,114 @@ def _balance_check(
 
 
 # ---------------------------------------------------------------------------
+# Cross-checks on extracted data
+# ---------------------------------------------------------------------------
+
+def _resolve_date_orders(
+    bank_raw: List[Any],
+    ledger_raw: List[Any],
+    currency: Optional[str],
+    tolerance: int,
+) -> Tuple[bool, bool, List[str]]:
+    """
+    Picks DD/MM vs MM/DD for documents whose numeric dates are all ambiguous (every part <= 12):
+    the reading that lines up best with the other document's dates wins; ties fall back to the
+    currency's custom (MM/DD for USD, DD/MM otherwise). Documents with clear evidence keep it.
+    """
+    values = [[tx.get("date") for tx in raw if isinstance(tx, dict)] for raw in (bank_raw, ledger_raw)]
+    known = [detect_date_order(v) for v in values]
+    if None not in known:
+        return known[0], known[1], []
+    default = currency == "USD"
+    uniques = [list({v for v in vals if v is not None and not isinstance(v, (dict, list))}) for vals in values]
+
+    def ordinals(idx: int, month_first: bool) -> List[int]:
+        parsed = {v: parse_date(v, month_first) for v in uniques[idx]}
+        return sorted(parsed[v].toordinal() for v in values[idx] if v in parsed and parsed[v])
+
+    def score(bank_mf: bool, ledger_mf: bool) -> int:
+        bank_days, ledger_days = ordinals(0, bank_mf), ordinals(1, ledger_mf)
+        return sum(
+            1 for o in ledger_days
+            if bisect_right(bank_days, o + tolerance) > bisect_left(bank_days, o - tolerance)
+        )
+
+    choices = [[k] if k is not None else [default, not default] for k in known]
+    combos = [(b, l) for b in choices[0] for l in choices[1]]
+    # max() keeps the first of equal scores, and combos list the currency default first.
+    bank_mf, ledger_mf = max(combos, key=lambda c: (score(*c), c[0] == c[1]))
+
+    warnings = []
+    for idx, (chosen, label) in enumerate(((bank_mf, "Bank statement"), (ledger_mf, "Business ledger"))):
+        ambiguous = known[idx] is None and any(
+            _NUMERIC_DATE.match(_TRAILING_TIME.sub("", str(v).strip())) for v in uniques[idx]
+        )
+        if ambiguous and chosen != default:
+            warnings.append(
+                f"{label} dates are ambiguous (DD/MM or MM/DD); they were read as "
+                f"{'MM/DD' if chosen else 'DD/MM'}, the reading consistent with the other document's dates."
+            )
+    return bank_mf, ledger_mf, warnings
+
+
+def repair_directions_from_balances(
+    txs: List[NormalizedTransaction],
+    label: str,
+    opening: Optional[Decimal] = None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """
+    OCR/AI extraction of column layouts sometimes puts an amount under the wrong Debit/Credit header.
+    When the running balance moves by exactly the amount, it shows which side the row is on. If at
+    least 90% of such rows follow one rule (credit raises the balance, or debit does), the few rows
+    that contradict it are flipped. Returns (corrections, warnings); amounts are never changed.
+    """
+    ordered, _ = _chronological(txs)
+    groups: Dict[bool, List[NormalizedTransaction]] = {True: [], False: []}  # credit-raises-balance?
+    prev: Optional[Decimal] = opening
+    for t in ordered:
+        if t.balance is not None and prev is not None:
+            delta = t.balance - prev
+            if delta != 0 and abs(delta) == t.amount:
+                groups[(delta > 0) == (t.direction == "credit")].append(t)
+        prev = t.balance
+    majority, minority = sorted(groups.values(), key=len, reverse=True)
+    if len(majority) < 5 or not minority or len(minority) * 9 > len(majority):
+        return [], []
+    corrections = []
+    for t in minority:
+        old = t.direction
+        t.direction = "debit" if old == "credit" else "credit"
+        corrections.append({
+            "source": t.source, "transaction_id": t.id, "field": "direction", "extracted": old, "corrected": t.direction,
+        })
+    warning = (
+        f"{len(corrections)} {label} transaction(s) were extracted under the wrong debit/credit column; "
+        "the side was corrected from the running balance (see amount_corrections)."
+    )
+    return corrections, [warning]
+
+
+def _period_overlap_warning(
+    bank: List[NormalizedTransaction],
+    ledger: List[NormalizedTransaction],
+    tolerance: int,
+) -> Optional[str]:
+    bank_dates = [t.date for t in bank if t.date]
+    ledger_dates = [t.date for t in ledger if t.date]
+    if not bank_dates or not ledger_dates:
+        return None
+    b0, b1, l0, l1 = min(bank_dates), max(bank_dates), min(ledger_dates), max(ledger_dates)
+    gap = timedelta(days=tolerance)
+    if l1 < b0 - gap or l0 > b1 + gap:
+        return (
+            f"The business ledger dates ({l0.isoformat()} to {l1.isoformat()}) do not overlap the bank statement "
+            f"period ({b0.isoformat()} to {b1.isoformat()}), so no transactions can match. "
+            "Check that the correct documents were uploaded."
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -940,13 +1118,27 @@ def _reconcile_amounts(
         if flag:
             warnings.append(f"{label} amounts use a comma as the decimal separator (e.g. 1.234,56).")
 
-    bank, bank_warnings = normalize_transactions(bank_data.get("transactions") or [], "bank", bank_comma)
-    ledger, ledger_warnings = normalize_transactions(ledger_data.get("transactions") or [], "ledger", ledger_comma)
-    warnings += bank_warnings + ledger_warnings
+    bank_raw, ledger_raw = bank_data.get("transactions") or [], ledger_data.get("transactions") or []
+    bank_mf, ledger_mf, date_warnings = _resolve_date_orders(bank_raw, ledger_raw, currency, options.date_tolerance_days)
+    bank, bank_warnings = normalize_transactions(bank_raw, "bank", bank_comma, bank_mf)
+    ledger, ledger_warnings = normalize_transactions(ledger_raw, "ledger", ledger_comma, ledger_mf)
+    warnings += date_warnings + bank_warnings + ledger_warnings
     if not bank:
         raise ReconciliationError("Unable to extract transactions from the bank statement.")
     if not ledger:
         raise ReconciliationError("Unable to extract transactions from the business ledger.")
+    # Only OCR/AI-extracted documents (they carry _raw_text) can have amounts under the wrong column.
+    for txs, data, comma, label in (
+        (bank, bank_data, bank_comma, "bank statement"), (ledger, ledger_data, ledger_comma, "business ledger"),
+    ):
+        if "_raw_text" in data:
+            opening = to_decimal(data.get("opening_balance"), comma)
+            fixes, fix_warnings = repair_directions_from_balances(txs, label, opening)
+            amount_corrections += fixes
+            warnings += fix_warnings
+    period_warning = _period_overlap_warning(bank, ledger, options.date_tolerance_days)
+    if period_warning:
+        warnings.append(period_warning)
 
     # Ledgers exported from accounting books record bank deposits as debits; detect which convention fits.
     bank_conv = _greedy_assign(_exact_candidates(bank, ledger, "bank", options))
@@ -1093,26 +1285,37 @@ def _reconcile_amounts(
 _HEADER_SYNONYMS: Dict[str, Tuple[str, ...]] = {
     "date": ("date", "txn date", "transaction date", "tran date", "posting date", "entry date", "voucher date",
              "buchungstag", "buchungsdatum", "datum", "date operation", "fecha", "fecha operacion", "data", "data movimento",
-             "value date", "valuta", "wertstellung", "date valeur", "fecha valor"),
+             "value date", "valuta", "wertstellung", "date valeur", "fecha valor", "dt", "txn dt", "tran dt", "trans date",
+             "transaction dt", "date posted", "posted date", "posting dt", "booking date", "book date", "value dt",
+             "doc date", "document date", "vch date", "bill date", "invoice date"),
     "description": ("description", "narration", "particulars", "details", "transaction details", "remarks", "memo", "payee",
                     "transaction description", "verwendungszweck", "buchungstext", "beschreibung", "libelle", "concepto",
-                    "descripcion", "descricao", "historico", "omschrijving", "mededelingen"),
+                    "descripcion", "descricao", "historico", "omschrijving", "mededelingen", "narrative",
+                    "transaction narration", "transaction remarks", "detail", "beneficiary", "counterparty", "payee name",
+                    "name", "account name", "ledger name"),
     "reference": ("reference", "ref", "ref no", "reference no", "reference number", "cheque no", "chq no", "chq ref no",
                   "cheque number", "utr", "utr no", "voucher no", "vch no", "instrument no", "transaction id", "txn id",
-                  "referenz", "reference operation", "referencia", "documento", "kenmerk"),
+                  "referenz", "reference operation", "referencia", "documento", "kenmerk", "num", "doc no",
+                  "document no", "document number", "invoice no", "invoice number", "check no", "check number",
+                  "chq ref", "ref number", "voucher number", "receipt no", "transaction ref"),
     "debit": ("debit", "debits", "withdrawal", "withdrawals", "dr", "debit amount", "withdrawal amt", "withdrawal amount",
-              "paid out", "money out", "payments", "soll", "belastung", "lastschrift", "debe", "cargo", "cargos", "debito", "af"),
+              "paid out", "money out", "payments", "soll", "belastung", "lastschrift", "debe", "cargo", "cargos", "debito", "af",
+              "debit amt", "dr amount", "dr amt", "withdrawl", "withdrawls", "outflow", "outflows", "cash out", "out", "paid",
+              "payment", "spent", "expense", "expenses"),
     "credit": ("credit", "credits", "deposit", "deposits", "cr", "credit amount", "deposit amt", "deposit amount",
-               "paid in", "money in", "receipts", "haben", "gutschrift", "haber", "abono", "abonos", "credito", "bij"),
+               "paid in", "money in", "receipts", "haben", "gutschrift", "haber", "abono", "abonos", "credito", "bij",
+               "credit amt", "cr amount", "cr amt", "inflow", "inflows", "cash in", "in", "received", "receipt", "income",
+               "lodgement", "lodgements"),
     "amount": ("amount", "transaction amount", "amt", "net amount", "betrag", "umsatz", "montant", "importe", "valor", "bedrag"),
     "type": ("type", "dr cr", "cr dr", "transaction type", "debit credit", "txn type", "soll haben", "af bij", "sens"),
     "balance": ("balance", "running balance", "closing balance", "balance amount", "available balance",
-                "saldo", "kontostand", "solde"),
+                "saldo", "kontostand", "solde", "bal", "running bal", "closing bal", "ledger balance", "book balance"),
 }
 _HEADER_CONTAINS: Tuple[Tuple[str, str], ...] = (
     ("withdraw", "debit"), ("deposit", "credit"), ("narration", "description"), ("particular", "description"),
     ("description", "description"), ("balance", "balance"), ("cheque", "reference"), ("chq", "reference"),
-    ("utr", "reference"), ("ref", "reference"), ("debit", "debit"), ("credit", "credit"), ("amount", "amount"), ("date", "date"),
+    ("utr", "reference"), ("ref", "reference"), ("withdrawl", "debit"), ("outflow", "debit"), ("inflow", "credit"),
+    ("debit", "debit"), ("credit", "credit"), ("amount", "amount"), ("date", "date"),
 )
 
 
@@ -1140,8 +1343,136 @@ def _map_header(row: List[Any]) -> Dict[str, int]:
     return mapping
 
 
-def _read_rows(content: bytes, ext: str) -> List[List[Any]]:
-    if ext == ".xlsx":
+SPREADSHEET_HEADER_SCAN_ROWS = 50
+_XLS_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_TABULAR_DELIMITERS = ",;\t|"
+
+
+def decode_text(content: bytes) -> Optional[str]:
+    """
+    Decodes a delimited-text export (UTF-8, UTF-16/32 with or without BOM, Windows-1252, Latin-1).
+    Returns None for binary content that is not text.
+    """
+    text: Optional[str] = None
+    if content.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        text = content.decode("utf-32", errors="replace")
+    elif content.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        text = content.decode("utf-16", errors="replace")
+    else:
+        head = content[:4096]
+        if head.count(b"\x00") > len(head) // 4:
+            # BOM-less UTF-16 (Excel "Unicode Text" and several bank portals): NULs in every other byte.
+            odd_nuls, even_nuls = head[1::2].count(b"\x00"), head[0::2].count(b"\x00")
+            encoding = "utf-16-le" if odd_nuls > even_nuls else "utf-16-be"
+            text = content[: len(content) - len(content) % 2].decode(encoding, errors="replace")
+        else:
+            for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+                try:
+                    text = content.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+    if text is None:
+        return None
+    sample = text[:8192]
+    control = sum(1 for ch in sample if ord(ch) < 32 and ch not in "\t\r\n\f")
+    if "\x00" in sample or control > len(sample) // 100 + 2:
+        return None
+    return text
+
+
+def sniff_spreadsheet(content: bytes) -> Optional[str]:
+    """
+    Identifies a tabular upload by its bytes rather than its extension, because exports are often
+    misnamed (an .xlsx saved as .csv, an HTML table saved as .xls). Returns 'xlsx', 'xls', 'html',
+    'xml' (SpreadsheetML 2003), 'csv', or None when the bytes are not a readable spreadsheet.
+    """
+    if content.startswith(b"PK\x03\x04"):
+        return "xlsx"
+    if content.startswith(_XLS_SIGNATURE):
+        return "xls"
+    text = decode_text(content)
+    if text is None:
+        return None
+    head = text[:2048].lstrip().lower()
+    if head.startswith("<?xml") and "urn:schemas-microsoft-com:office:spreadsheet" in text[:4096].lower():
+        return "xml"
+    if head.startswith(("<html", "<!doctype html", "<table", "<meta", "<head", "<body")) or (
+        head.startswith("<") and "<table" in text[:200000].lower()
+    ):
+        return "html"
+    return "csv" if _is_delimited(text) else None
+
+
+def _is_delimited(text: str) -> bool:
+    """A transaction export needs at least two columns (date + amount) on some early line."""
+    sample = text[:8192]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=_TABULAR_DELIMITERS)
+    except csv.Error:
+        dialect = csv.excel
+    for i, row in enumerate(csv.reader(io.StringIO(sample), dialect)):
+        if sum(1 for c in row if c.strip()) >= 2:
+            return True
+        if i >= SPREADSHEET_HEADER_SCAN_ROWS:
+            break
+    return False
+
+
+class _HTMLTableParser(HTMLParser):
+    """Collects the cells of every <table> in an HTML document (bank 'Excel' exports are often HTML)."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tables: List[List[List[str]]] = []
+        self._row: Optional[List[str]] = None
+        self._cell: Optional[List[str]] = None
+        self._colspan = 1
+        self._depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self._depth += 1
+            self.tables.append([])
+        elif tag == "tr" and self._depth:
+            self._row = []
+        elif tag in ("td", "th") and self._row is not None:
+            self._cell = []
+            span = dict(attrs).get("colspan") or "1"
+            self._colspan = int(span) if str(span).isdigit() else 1
+        elif tag == "br" and self._cell is not None:
+            self._cell.append(" ")
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self._cell is not None and self._row is not None:
+            self._row.append(re.sub(r"\s+", " ", "".join(self._cell)).strip())
+            self._row.extend([""] * (min(self._colspan, 50) - 1))
+            self._cell = None
+        elif tag == "tr" and self._row is not None:
+            if self.tables:
+                self.tables[-1].append(self._row)
+            self._row = None
+        elif tag == "table" and self._depth:
+            self._depth -= 1
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell.append(data)
+
+
+def _check_row_limit(rows: List[Any]) -> None:
+    if len(rows) > MAX_SPREADSHEET_ROWS:
+        raise ReconciliationError(f"Spreadsheet exceeds the maximum of {MAX_SPREADSHEET_ROWS} rows.")
+
+
+def _read_sheets(content: bytes) -> List[List[List[Any]]]:
+    """Returns every sheet/table in the file as a list of rows, in workbook order."""
+    fmt = sniff_spreadsheet(content)
+    if fmt is None:
+        raise ReconciliationError("The file is not a readable CSV or Excel spreadsheet.")
+    sheets: List[List[List[Any]]] = []
+
+    if fmt == "xlsx":
         import openpyxl
 
         try:
@@ -1149,26 +1480,90 @@ def _read_rows(content: bytes, ext: str) -> List[List[Any]]:
         except Exception as e:
             raise ReconciliationError("The spreadsheet could not be opened; it may be corrupted or password protected.") from e
         try:
-            ws = wb.active or (wb.worksheets[0] if wb.worksheets else None)
-            if ws is None:
+            if not wb.worksheets:
                 raise ReconciliationError("The spreadsheet contains no worksheets.")
-            rows = []
-            for row in ws.iter_rows(values_only=True):
-                rows.append(list(row))
-                if len(rows) > MAX_SPREADSHEET_ROWS:
-                    raise ReconciliationError(f"Spreadsheet exceeds the maximum of {MAX_SPREADSHEET_ROWS} rows.")
-            return rows
+            active = wb.active
+            ordered = ([active] if active is not None else []) + [ws for ws in wb.worksheets if ws is not active]
+            for ws in ordered:
+                if getattr(ws, "sheet_state", "visible") != "visible" and len(ordered) > 1:
+                    continue
+                rows = []
+                for row in ws.iter_rows(values_only=True):
+                    rows.append(list(row))
+                    _check_row_limit(rows)
+                sheets.append(rows)
         finally:
             wb.close()
+        return sheets
 
-    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+    if fmt == "xls":
         try:
-            text = content.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            continue
+            import xlrd
+        except ImportError as e:
+            raise ReconciliationError("Legacy .xls files are not supported on this server; save the file as .xlsx or .csv.") from e
+        try:
+            book = xlrd.open_workbook(file_contents=content, on_demand=True)
+        except Exception as e:
+            raise ReconciliationError("The .xls spreadsheet could not be opened; it may be corrupted or password protected.") from e
+        try:
+            for sheet in book.sheets():
+                if sheet.visibility != 0 and book.nsheets > 1:
+                    continue
+                rows = []
+                for r in range(sheet.nrows):
+                    row = []
+                    for cell in sheet.row(r):
+                        if cell.ctype == xlrd.XL_CELL_DATE:
+                            try:
+                                row.append(xlrd.xldate_as_datetime(cell.value, book.datemode))
+                                continue
+                            except Exception:
+                                pass
+                        row.append(None if cell.ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK) else cell.value)
+                    rows.append(row)
+                    _check_row_limit(rows)
+                sheets.append(rows)
+        finally:
+            book.release_resources()
+        return sheets
+
+    text = decode_text(content) or ""
+    if fmt == "html":
+        parser = _HTMLTableParser()
+        try:
+            parser.feed(text)
+            parser.close()
+        except Exception as e:
+            raise ReconciliationError("The HTML spreadsheet export could not be read.") from e
+        for table in parser.tables:
+            _check_row_limit(table)
+        return [t for t in parser.tables if t]
+
+    if fmt == "xml":
+        import xml.etree.ElementTree as ET
+
+        ns = "{urn:schemas-microsoft-com:office:spreadsheet}"
+        try:
+            root = ET.fromstring(text.encode("utf-8"))
+        except ET.ParseError as e:
+            raise ReconciliationError("The XML spreadsheet export could not be read.") from e
+        for table in root.iter(f"{ns}Table"):
+            rows = []
+            for row_el in table.iter(f"{ns}Row"):
+                row: List[Any] = []
+                for cell in row_el.iter(f"{ns}Cell"):
+                    index = cell.get(f"{ns}Index")
+                    if index and index.isdigit():
+                        row.extend([None] * max(0, int(index) - 1 - len(row)))
+                    data = cell.find(f"{ns}Data")
+                    row.append(None if data is None else "".join(data.itertext()))
+                rows.append(row)
+                _check_row_limit(rows)
+            sheets.append(rows)
+        return sheets
+
     try:
-        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=_TABULAR_DELIMITERS)
     except csv.Error:
         dialect = csv.excel
     rows = []
@@ -1176,7 +1571,7 @@ def _read_rows(content: bytes, ext: str) -> List[List[Any]]:
         rows.append(row)
         if len(rows) > MAX_SPREADSHEET_ROWS:
             raise ReconciliationError(f"CSV exceeds the maximum of {MAX_SPREADSHEET_ROWS} rows.")
-    return rows
+    return [rows]
 
 
 def _cell(row: List[Any], idx: Optional[int]) -> Any:
@@ -1189,36 +1584,99 @@ def _cell(row: List[Any], idx: Optional[int]) -> Any:
     return value
 
 
-def parse_spreadsheet(content: bytes, filename: str) -> Dict[str, Any]:
-    """Parses a CSV/XLSX statement or ledger into the same shape as BankStatementExtraction."""
-    ext = os.path.splitext(filename.lower())[1]
-    rows = _read_rows(content, ext)
+def _is_header(mapping: Dict[str, int]) -> bool:
+    return "date" in mapping and bool({"debit", "credit", "amount"} & mapping.keys())
 
-    header_idx, mapping = None, {}
-    for idx, row in enumerate(rows[:30]):
-        candidate = _map_header(row)
-        if "date" in candidate and ({"debit", "credit", "amount"} & candidate.keys()):
-            header_idx, mapping = idx, candidate
+
+def _find_header(rows: List[List[Any]]) -> Optional[Tuple[int, int, Dict[str, int]]]:
+    """
+    Returns (header_row_index, first_data_row_index, column_mapping). Also accepts headers split over
+    two rows (e.g. 'Date | Particulars | Amount' above 'Debit | Credit'), as accounting packages export them.
+    """
+    scan = rows[:SPREADSHEET_HEADER_SCAN_ROWS]
+    for idx, row in enumerate(scan):
+        single = _map_header(row)
+        if idx + 1 < len(rows):
+            below = rows[idx + 1]
+            width = max(len(row), len(below))
+            merged_row = [
+                " ".join(str(c) for c in (_cell(row, i), _cell(below, i)) if c is not None)
+                for i in range(width)
+            ]
+            merged = _map_header(merged_row)
+            below_is_data = "date" in single and parse_date(_cell(below, single["date"])) is not None
+            # The second header row must add columns (e.g. "Debit | Credit" under "Amount") and not be data.
+            if (
+                _is_header(merged) and len(merged) > len(single)
+                and not below_is_data and not _is_header(_map_header(below))
+            ):
+                return idx, idx + 2, merged
+        if _is_header(single):
+            return idx, idx + 1, single
+    return None
+
+
+def spreadsheet_preview(content: bytes, max_rows: int = SPREADSHEET_HEADER_SCAN_ROWS) -> List[List[List[str]]]:
+    """First rows of every sheet as strings (for AI-assisted column mapping when no header is recognised)."""
+    preview = []
+    for rows in _read_sheets(content):
+        preview.append([
+            ["" if c is None else str(c)[:60] for c in row[:30]]
+            for row in rows[:max_rows]
+        ])
+    return preview
+
+
+def parse_spreadsheet(
+    content: bytes,
+    filename: str,
+    column_hint: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Parses a CSV/TSV/XLSX/XLS (or HTML/XML 'Excel' export) statement or ledger into the same shape as
+    BankStatementExtraction. The first sheet with a recognisable header is used.
+    column_hint: {"sheet": int, "header_row": int, "columns": {field: column_index}} from AI mapping,
+    used when no header is recognised by name.
+    """
+    sheets = _read_sheets(content)
+    rows: List[List[Any]] = []
+    found = None
+    for sheet_rows in sheets:
+        found = _find_header(sheet_rows)
+        if found:
+            rows = sheet_rows
             break
-    if header_idx is None:
+    if found is None and column_hint:
+        sheet_idx, header_idx = int(column_hint.get("sheet", 0)), int(column_hint.get("header_row", -1))
+        mapping = {k: int(v) for k, v in (column_hint.get("columns") or {}).items() if isinstance(v, int)}
+        if 0 <= sheet_idx < len(sheets) and -1 <= header_idx < len(sheets[sheet_idx]) and _is_header(mapping):
+            rows = sheets[sheet_idx]
+            found = (header_idx, header_idx + 1, mapping)
+    if found is None:
         raise ReconciliationError(
             "Could not find a header row with date and amount columns "
             "(expected columns such as Date, Description, Debit, Credit or Amount)."
         )
+    header_idx, data_start, mapping = found
+    header_cells = rows[header_idx] if header_idx >= 0 else []
+    header_keys = [_norm_header(c) for c in header_cells]
 
     transactions: List[Dict[str, Any]] = []
     opening = closing = None
     found_currencies: set = set()
     ambiguous_symbol = False
     # Headers such as "Amount (CAD)" or "Debit £" state the currency for the whole sheet.
-    for cell in rows[header_idx]:
-        code, ambiguous = detect_currency_in_text(cell)
-        if code:
-            found_currencies.add(code)
-        ambiguous_symbol |= ambiguous
-    for row in rows[header_idx + 1:]:
+    for cell in rows[header_idx:data_start] if header_idx >= 0 else []:
+        for value in cell:
+            code, ambiguous = detect_currency_in_text(value)
+            if code:
+                found_currencies.add(code)
+            ambiguous_symbol |= ambiguous
+    for row in rows[data_start:]:
         if not any(c not in (None, "") for c in row):
             continue
+        if header_keys and [_norm_header(c) for c in row[: len(header_keys)]] == header_keys:
+            continue  # header repeated on every printed page
         description = _cell(row, mapping.get("description"))
         desc_text = str(description or "").lower()
         raw_date = _cell(row, mapping.get("date"))
@@ -1232,7 +1690,13 @@ def parse_spreadsheet(content: bytes, filename: str) -> Dict[str, Any]:
         if desc_text.startswith(("closing balance", "balance c/f", "balance carried forward", "carried forward")):
             closing = balance if balance is not None else next((c for c in amount_cells if c is not None), None)
             continue
-        if raw_date is None and desc_text.startswith("total"):
+        if raw_date is None and desc_text.startswith(("total", "grand total", "sub total", "subtotal", "page total")):
+            continue
+        if raw_date is None and balance is None and all(c is None for c in amount_cells):
+            if description is not None and transactions:
+                # A narration that wraps onto the next row belongs to the transaction above it.
+                prev = transactions[-1]
+                prev["description"] = f"{prev['description'] or ''} {description}".strip()
             continue
         for c in amount_cells + [balance]:
             code, ambiguous = detect_currency_in_text(c)
