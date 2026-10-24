@@ -73,3 +73,6 @@ logs/
 
 # Mac OS
 .DS_Store
+
+# Docker / e-invoice archive (tamper-evident originals, keep out of git)
+storage/einvoice_archive/

@@ -10,6 +10,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.einvoice.router import convert_router as einvoice_convert_router
+from app.api.einvoice.router import router as einvoice_router
 from app.api.v1.router import router as api_v1_router
 from app.core.config import get_settings
 from app.db.mongodb import MongoDBManager
@@ -91,6 +93,15 @@ def create_application() -> FastAPI:
             "description": (
                 "Upload a bank statement and a business ledger, receive a `reconciliation_id`, and poll it for progress, "
                 "the saved report, paginated discrepancies, and XLSX/CSV exports. Works for API-key users and guests."
+            ),
+        },
+        {
+            "name": "E-Invoicing (ZUGFeRD / XRechnung)",
+            "description": (
+                "German e-invoicing under `/api/einvoice`:\n"
+                "- **ZUGFeRD 2.x** (EN 16931 / COMFORT): PDF/A-3 with embedded `factur-x.xml` (B2B)\n"
+                "- **XRechnung 3.x**: pure CII XML with Leitweg-ID (B2G)\n"
+                "- Extraction, validation (XSD, EN 16931 + BR-DE rules, KoSIT) and tamper-evident archiving of originals."
             ),
         },
         {
@@ -208,6 +219,9 @@ def create_application() -> FastAPI:
 
     # Include API Routers
     app.include_router(api_v1_router, prefix=settings.api_v1_prefix)
+    app.include_router(einvoice_router)
+    app.include_router(einvoice_convert_router, prefix="/api/einvoice")
+    app.include_router(einvoice_convert_router, prefix=settings.api_v1_prefix)
 
     return app
 
