@@ -17,13 +17,15 @@ from app.schemas.einvoice import (
     EInvoiceProfile,
     FormatType,
     InvoiceDataSchema,
+    PdfTemplate,
     ValidationIssue,
     ValidationReport,
 )
 from app.services.einvoice.calculator import complete_invoice
 from app.services.einvoice.cii_builder import build_cii
 from app.services.einvoice.codes import COUNTRY_CODES, COUNTRY_NAME_ALIASES
-from app.services.einvoice.pdf import PdfInputError, check_uploaded_pdf, embed_xml, normalize_to_pdfa, render_invoice_pdf
+from app.services.einvoice.pdf import PdfInputError, check_uploaded_pdf, embed_xml, normalize_to_pdfa
+from app.services.einvoice.pdf_templates import render_invoice_pdf
 from app.services.einvoice.rules import check_business_rules
 from app.services.einvoice.validator import Analysis, analyse_pdf, analyse_xml, pydantic_errors_to_issues
 
@@ -79,7 +81,8 @@ def _ensure_valid(analysis: Analysis, what: str) -> ValidationReport:
     return report
 
 
-async def create_zugferd(invoice: EInvoiceData, source_pdf: Optional[bytes] = None) -> ZugferdResult:
+async def create_zugferd(invoice: EInvoiceData, source_pdf: Optional[bytes] = None,
+                         template: PdfTemplate = PdfTemplate.CLASSIC) -> ZugferdResult:
     completed = prepare_invoice(invoice, EInvoiceProfile.ZUGFERD_EN16931)
     xml = await asyncio.to_thread(build_cii, completed, EInvoiceProfile.ZUGFERD_EN16931)
     # KoSIT (if installed) runs once, on the final PDF below.
@@ -99,7 +102,7 @@ async def create_zugferd(invoice: EInvoiceData, source_pdf: Optional[bytes] = No
                         "for strict PDF/A-3 conformance (set EINVOICE_GHOSTSCRIPT_BIN to enable conversion; verify with veraPDF).",
             ))
     else:
-        visual = await asyncio.to_thread(render_invoice_pdf, completed)
+        visual = await asyncio.to_thread(render_invoice_pdf, completed, template)
 
     try:
         pdf = await asyncio.to_thread(embed_xml, visual, xml, completed)

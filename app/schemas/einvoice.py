@@ -89,6 +89,13 @@ class EInvoiceProfile(str, Enum):
     XRECHNUNG = "XRECHNUNG"
 
 
+class PdfTemplate(str, Enum):
+    """Design of the rendered visual invoice PDF (only used when no PDF is uploaded)."""
+    CLASSIC = "classic"
+    MODERN = "modern"
+    MINIMAL = "minimal"
+
+
 # ---------------------------------------------------------------------------
 # Parties
 # ---------------------------------------------------------------------------

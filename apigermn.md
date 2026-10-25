@@ -17,11 +17,11 @@ All endpoints need `X-API-Key: <key>` or `Authorization: Bearer <key>`, the same
 
 | Method & path | Input | Returns |
 |---|---|---|
-| `POST /api/einvoice/create-zugferd` | multipart: `invoice_data` (JSON string, ≤ 1 MB) **or** `invoice_file` (JSON file, for large invoices), optional `file` (PDF) | ZUGFeRD PDF plus a validation summary in headers. With `?output=json`: `{pdf_base64, xml, validation, archive}` |
+| `POST /api/einvoice/create-zugferd` | multipart: `invoice_data` (JSON string, ≤ 1 MB) **or** `invoice_file` (JSON file, for large invoices), optional `file` (PDF); `?template=classic\|modern\|minimal` | ZUGFeRD PDF plus a validation summary in headers. With `?output=json`: `{pdf_base64, xml, validation, archive}` |
 | `POST /api/einvoice/create-xrechnung` | JSON body (same invoice schema) | XRechnung XML. With `?output=json`: `{xml, validation, archive}` |
 | `POST /api/einvoice/extract` | multipart: `file` (ZUGFeRD PDF or XML) | Parsed invoice JSON, raw XML, detected profile, version and XMP data |
 | `POST /api/einvoice/validate` | multipart: `file` (PDF or XML) | `{valid, errors[], warnings[], checks, profile, version}` |
-| `POST /api/einvoice/convert` (also at `/api/v1/convert`) | multipart: `file` (PDF), `invoice_data` or `invoice_file` (flat form JSON) | ZUGFeRD PDF or XRechnung XML, chosen by `format_type` |
+| `POST /api/einvoice/convert` (also at `/api/v1/convert`) | multipart: `file` (PDF), `invoice_data` or `invoice_file` (flat form JSON); `?template=…` | ZUGFeRD PDF or XRechnung XML, chosen by `format_type` |
 | `GET /api/einvoice/archive/{archive_id}` | – | Integrity check of an archived record (hashes and ledger chain) |
 
 Interactive docs with examples (sample invoice 471102) are at **`/docs`**, under the tag *E-Invoicing (ZUGFeRD / XRechnung)*.
@@ -107,10 +107,13 @@ curl -X POST http://localhost:8000/api/einvoice/create-zugferd \
   -F "file=@rechnung.pdf;type=application/pdf" \
   -o 471102_zugferd.pdf -D headers.txt
 
-# JSON only: the server renders the visual PDF itself
-curl -X POST http://localhost:8000/api/einvoice/create-zugferd \
+# JSON only: the server renders the visual PDF itself (design: classic | modern | minimal)
+curl -X POST "http://localhost:8000/api/einvoice/create-zugferd?template=modern" \
   -H "X-API-Key: $KEY" -F "invoice_data=<invoice_471102.json" -o 471102_zugferd.pdf
 ```
+
+> `template` selects the design of the rendered PDF: `classic` (default, DIN 5008 letterhead), `modern` (coloured header band)
+> or `minimal` (lots of white space). It has no effect when you upload your own `file`.
 
 > `invoice_data` is a text form field, and Starlette caps multipart text fields at **1 MB** (about 2,000 lines).
 > - Send the contents with `-F "invoice_data=<file.json"`.

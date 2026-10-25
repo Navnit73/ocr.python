@@ -239,6 +239,31 @@ async def test_create_zugferd_with_uploaded_pdf_json_output(client, headers, tmp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("template", ["classic", "modern", "minimal"])
+async def test_create_zugferd_renders_each_pdf_template(client, headers, template):
+    response = await client.post(
+        f"{BASE}/create-zugferd", headers=headers, params={"template": template},
+        data={"invoice_data": json.dumps(SAMPLE_INVOICE_471102)},
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["x-validation-valid"] == "true"
+    assert facturx.get_xml_from_pdf(response.content, check_xsd=True)[0] == "factur-x.xml"
+    with pymupdf.open(stream=response.content, filetype="pdf") as doc:
+        text = doc[0].get_text()
+    for expected in ("Kunden AG Mitte", "Trennblätter A4", "529,87", "DE02 1203 0000 0000 2020 51", "USt-IdNr. DE123456789"):
+        assert expected in text, expected
+
+
+@pytest.mark.asyncio
+async def test_create_zugferd_rejects_unknown_pdf_template(client, headers):
+    response = await client.post(
+        f"{BASE}/create-zugferd", headers=headers, params={"template": "fancy"},
+        data={"invoice_data": json.dumps(SAMPLE_INVOICE_471102)},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_create_zugferd_rejects_mismatched_totals(client, headers):
     data = sample()
     data["totals"]["vat_total"] = 56.00
@@ -513,6 +538,17 @@ async def test_convert_flat_form_to_zugferd(client, headers, path):
     assert response.status_code == 200, response.text
     _, xml = facturx.get_xml_from_pdf(response.content, check_xsd=True)
     assert b"<ram:GrandTotalAmount>529.87</ram:GrandTotalAmount>" in xml
+
+
+@pytest.mark.asyncio
+async def test_convert_flat_form_renders_chosen_template(client, headers):
+    response = await client.post(
+        f"{BASE}/convert", headers=headers, params={"template": "modern"},
+        data={"invoice_data": json.dumps(SAMPLE_FLAT_INVOICE)},
+    )
+    assert response.status_code == 200, response.text
+    with pymupdf.open(stream=response.content, filetype="pdf") as doc:
+        assert "RECHNUNG AN" in doc[0].get_text()
 
 
 @pytest.mark.asyncio

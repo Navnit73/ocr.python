@@ -27,6 +27,7 @@ from app.schemas.einvoice import (
     ExtractResponse,
     FormatType,
     InvoiceDataSchema,
+    PdfTemplate,
     ValidationReport,
 )
 from app.schemas.einvoice_examples import SAMPLE_FLAT_INVOICE, SAMPLE_INVOICE_471102, SAMPLE_XRECHNUNG_INVOICE
@@ -224,9 +225,9 @@ ErrorMapper = Optional[Callable[[EInvoiceInputError], EInvoiceInputError]]
 
 async def _zugferd_response(invoice: EInvoiceData, source_pdf: Optional[bytes], raw_input: bytes, output: str,
                             client: AuthenticatedClient, operation: str, error_mapper: ErrorMapper = None,
-                            source_name: Optional[str] = None):
+                            source_name: Optional[str] = None, template: PdfTemplate = PdfTemplate.CLASSIC):
     try:
-        result = await service.create_zugferd(invoice, source_pdf)
+        result = await service.create_zugferd(invoice, source_pdf, template)
     except EInvoiceInputError as exc:
         raise _unprocessable(error_mapper(exc) if error_mapper else exc) from exc
     filename = f"{_file_stem(invoice.invoice_number)}_zugferd.pdf"
@@ -275,6 +276,7 @@ async def _xrechnung_response(invoice: EInvoiceData, raw_input: bytes, output: s
         "validates the final PDF again.\n\n"
         "- `output=pdf` (default): returns the PDF; validation summary in `X-Validation-*` headers.\n"
         "- `output=json`: returns `{pdf_base64, xml, validation, archive}`.\n\n"
+        "`template` picks the design of the rendered PDF (`classic`, `modern`, `minimal`); it is ignored when `file` is sent.\n\n"
         "Input JSON, uploaded PDF and generated PDF are archived unmodified with SHA-256 hashes (`X-Archive-Id`)."
     ),
     responses={
@@ -293,6 +295,7 @@ async def create_zugferd(
     invoice_file: Optional[UploadFile] = File(default=None, description="Alternative to invoice_data: the invoice JSON as a file"),
     file: Optional[UploadFile] = File(default=None, description="Optional visual invoice PDF (max 10 MB)"),
     output: Literal["pdf", "json"] = Query(default="pdf", description="Response format"),
+    template: PdfTemplate = Query(default=PdfTemplate.CLASSIC, description="Design of the rendered PDF (ignored when a PDF is uploaded)"),
     client: AuthenticatedClient = Depends(verify_api_key),
 ):
     source_pdf = None
@@ -304,7 +307,7 @@ async def create_zugferd(
     except EInvoiceInputError as exc:
         raise _unprocessable(exc) from exc
     return await _zugferd_response(invoice, source_pdf, raw_json.encode("utf-8"), output, client, "create-zugferd",
-                                   source_name=file.filename if source_pdf is not None else None)
+                                   source_name=file.filename if source_pdf is not None else None, template=template)
 
 
 @router.post(
@@ -431,7 +434,7 @@ async def verify_archive(archive_id: str, client: AuthenticatedClient = Depends(
         "Simplified form endpoint: multipart `file` (existing PDF invoice; optional for XRechnung, and for ZUGFeRD a PDF "
         "is rendered when omitted) and `invoice_data` (JSON string, `InvoiceDataSchema`). `format_type` selects the "
         "output. Addresses are given as 'Street No, Postcode City, Country'. For a valid XRechnung also send "
-        "`routing_id`, `seller_contact_name`, `seller_phone`, `seller_email`, `buyer_email` and `iban`."
+        "`routing_id`, `seller_contact_name`, `seller_phone`, `seller_email`, `buyer_email` and `iban`. `template` picks the design of a rendered ZUGFeRD PDF."
     ),
     responses={200: {"content": {"application/pdf": {}, "application/xml": {}}}, **COMMON_ERRORS},
 )
@@ -440,6 +443,7 @@ async def convert(
                                        examples=[json.dumps(SAMPLE_FLAT_INVOICE, ensure_ascii=False)]),
     invoice_file: Optional[UploadFile] = File(default=None, description="Alternative to invoice_data: the JSON as a file"),
     file: Optional[UploadFile] = File(default=None, description="Visual invoice PDF (max 10 MB)"),
+    template: PdfTemplate = Query(default=PdfTemplate.CLASSIC, description="Design of the rendered PDF (ignored when a PDF is uploaded)"),
     client: AuthenticatedClient = Depends(verify_api_key),
 ):
     source_pdf = None
@@ -459,4 +463,4 @@ async def convert(
     if flat.format_type == FormatType.XRECHNUNG:
         return await _xrechnung_response(invoice, raw, "xml", client, "convert-xrechnung", service.remap_flat_errors)
     return await _zugferd_response(invoice, source_pdf, raw, "pdf", client, "convert-zugferd", service.remap_flat_errors,
-                                   source_name=file.filename if source_pdf is not None else None)
+                                   source_name=file.filename if source_pdf is not None else None, template=template)

@@ -1,16 +1,15 @@
 """
-PDF handling for ZUGFeRD: visual invoice rendering, uploaded PDF checks, optional PDF/A-3 normalisation,
+PDF handling for ZUGFeRD: uploaded PDF checks, optional PDF/A-3 normalisation,
 XML embedding (factur-x.xml via the factur-x library) and extraction of embedded XML + XMP metadata.
+The visual invoice itself is rendered in pdf_templates.
 """
 
 import asyncio
 import io
 import logging
 import tempfile
-from decimal import Decimal
 from pathlib import Path
 from typing import Dict, Optional, Tuple
-from xml.sax.saxutils import escape
 
 import facturx
 from lxml import etree
@@ -31,13 +30,6 @@ VERSION_BY_FILENAME = {
     "xrechnung.xml": "ZUGFeRD 2.1+ (XRECHNUNG profile)",
 }
 
-TYPE_TITLES = {"381": "Gutschrift", "384": "Rechnungskorrektur", "389": "Gutschrift (Selbstfakturierung)",
-               "326": "Teilrechnung", "875": "Abschlagsrechnung (Bau)", "876": "Teilschlussrechnung (Bau)", "877": "Schlussrechnung (Bau)"}
-
-
-def _address_line(address) -> str:
-    return " ".join(filter(None, [address.postcode, address.city]))
-
 
 class PdfInputError(ValueError):
     """Uploaded PDF cannot be used (corrupt, encrypted, empty)."""
@@ -55,145 +47,6 @@ def check_uploaded_pdf(content: bytes) -> int:
     if pages == 0:
         raise PdfInputError("PDF has no pages")
     return pages
-
-
-def _de_amount(value: Optional[Decimal], currency: str = "") -> str:
-    if value is None:
-        return ""
-    text = f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    return f"{text} {currency}".strip()
-
-
-def _de_number(value: Decimal) -> str:
-    text = f"{value.normalize():f}"
-    return text.replace(".", ",")
-
-
-def _de_price(value: Decimal) -> str:
-    """Unit prices keep all significant decimals (min. 2), e.g. 0,0045 instead of a misleading 0,00."""
-    whole, _, frac = f"{value.normalize():f}".partition(".")
-    whole = f"{int(whole):,}".replace(",", ".") if whole.lstrip("-").isdigit() else whole
-    return f"{whole},{frac.ljust(2, '0')}"
-
-
-def render_invoice_pdf(invoice: EInvoiceData) -> bytes:
-    """Renders a human-readable A4 invoice with embedded fonts (prerequisite for PDF/A)."""
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.lib.units import mm
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-
-    if "Vera" not in pdfmetrics.getRegisteredFontNames():
-        pdfmetrics.registerFont(TTFont("Vera", "Vera.ttf"))
-        pdfmetrics.registerFont(TTFont("VeraBd", "VeraBd.ttf"))
-
-    base = ParagraphStyle("base", fontName="Vera", fontSize=9, leading=12)
-    small = ParagraphStyle("small", parent=base, fontSize=7, leading=9, textColor=colors.HexColor("#555555"))
-    title = ParagraphStyle("title", parent=base, fontName="VeraBd", fontSize=16, leading=20)
-    bold = ParagraphStyle("bold", parent=base, fontName="VeraBd")
-
-    def p(text: Optional[str], style: ParagraphStyle = base) -> Paragraph:
-        return Paragraph(escape(text or "").replace("\n", "<br/>"), style)
-
-    seller, buyer, cur = invoice.seller, invoice.buyer, invoice.currency
-    totals = invoice.totals
-    story = []
-
-    seller_line = " · ".join(filter(None, [seller.name, seller.address.street, _address_line(seller.address)]))
-    story += [p(seller_line, small), Spacer(1, 4 * mm)]
-    buyer_block = "\n".join(filter(None, [
-        buyer.name, buyer.address.street, buyer.address.additional_street,
-        _address_line(buyer.address), buyer.address.country,
-    ]))
-    meta_rows = [
-        ["Rechnungsnummer", invoice.invoice_number],
-        ["Rechnungsdatum", invoice.issue_date.strftime("%d.%m.%Y")],
-    ]
-    if invoice.delivery_date:
-        meta_rows.append(["Lieferdatum", invoice.delivery_date.strftime("%d.%m.%Y")])
-    if buyer.buyer_reference:
-        meta_rows.append(["Leitweg-ID / Referenz", buyer.buyer_reference])
-    if buyer.id:
-        meta_rows.append(["Kundennummer", buyer.id])
-    if invoice.order_reference:
-        meta_rows.append(["Bestellnummer", invoice.order_reference])
-    header = Table(
-        [[p(buyer_block), Table([[p(k, small), p(v)] for k, v in meta_rows], colWidths=[35 * mm, 45 * mm])]],
-        colWidths=[90 * mm, 80 * mm],
-    )
-    header.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
-    story += [header, Spacer(1, 8 * mm), p(TYPE_TITLES.get(invoice.type_code, "Rechnung"), title), Spacer(1, 3 * mm)]
-    for note in invoice.notes:
-        story.append(p(note))
-    story.append(Spacer(1, 4 * mm))
-
-    rows = [[p(h, bold) for h in ("Pos.", "Bezeichnung", "Menge", "Einzelpreis", "USt", "Netto")]]
-    for line in invoice.lines:
-        name = line.description + (f"\nArt.-Nr. {line.seller_article_number}" if line.seller_article_number else "") + (
-            f"\nGTIN {line.gtin}" if line.gtin else "")
-        rows.append([
-            p(line.position), p(name), p(f"{_de_number(line.quantity)} {line.unit}"),
-            p(_de_price(line.net_price) + (f" / {_de_number(line.price_base_quantity)} {line.unit}" if line.price_base_quantity else "")),
-            p(f"{_de_number(line.vat_rate)} %"), p(_de_amount(line.line_net_amount)),
-        ])
-    table = Table(rows, colWidths=[12 * mm, 72 * mm, 22 * mm, 24 * mm, 14 * mm, 26 * mm], repeatRows=1)
-    table.setStyle(TableStyle([
-        ("LINEBELOW", (0, 0), (-1, 0), 0.6, colors.black),
-        ("LINEBELOW", (0, 1), (-1, -1), 0.25, colors.HexColor("#cccccc")),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-    ]))
-    story += [table, Spacer(1, 5 * mm)]
-
-    sums = [["Summe Positionen", _de_amount(totals.line_total, cur)]]
-    if totals.allowances:
-        sums.append(["Nachlässe", f"- {_de_amount(totals.allowances, cur)}"])
-    if totals.charges:
-        sums.append(["Zuschläge", _de_amount(totals.charges, cur)])
-    sums.append(["Gesamt netto", _de_amount(totals.net_total, cur)])
-    for vat in invoice.vat_breakdown:
-        sums.append([f"USt {_de_number(vat.rate)} % auf {_de_amount(vat.basis_amount, cur)}", _de_amount(vat.tax_amount, cur)])
-    sums.append(["Gesamt brutto", _de_amount(totals.gross_total, cur)])
-    if totals.prepaid_amount:
-        sums.append(["Bereits gezahlt", f"- {_de_amount(totals.prepaid_amount, cur)}"])
-    sums.append(["Zahlbetrag", _de_amount(totals.payable_amount, cur)])
-    sum_table = Table([[p(k), p(v, bold if k in ("Gesamt brutto", "Zahlbetrag") else base)] for k, v in sums],
-                      colWidths=[60 * mm, 35 * mm], hAlign="RIGHT")
-    sum_table.setStyle(TableStyle([("LINEABOVE", (0, -1), (-1, -1), 0.6, colors.black)]))
-    story += [sum_table, Spacer(1, 6 * mm)]
-
-    payment = invoice.payment
-    if payment:
-        if payment.terms:
-            story.append(p(payment.terms))
-        if payment.discount_days and payment.discount_percent:
-            story.append(p(f"Bei Zahlung innerhalb von {payment.discount_days} Tagen gewähren wir {_de_number(payment.discount_percent)} % Skonto."))
-        if payment.due_date:
-            story.append(p(f"Fällig am {payment.due_date.strftime('%d.%m.%Y')}"))
-        if payment.iban:
-            story.append(p(f"IBAN {payment.iban}" + (f" · BIC {payment.bic}" if payment.bic else "")))
-        story.append(Spacer(1, 6 * mm))
-
-    footer = [seller.name, ", ".join(filter(None, [seller.address.street, _address_line(seller.address)]))]
-    if seller.vat_id:
-        footer.append(f"USt-IdNr.: {seller.vat_id}")
-    if seller.tax_number:
-        footer.append(f"Steuernummer: {seller.tax_number}")
-    if seller.legal and seller.legal.as_text():
-        footer.append(seller.legal.as_text())
-    if seller.contact:
-        footer.append(" · ".join(filter(None, [seller.contact.name, seller.contact.phone, seller.contact.email])))
-    story.append(p(" | ".join(filter(None, footer)), small))
-
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer, pagesize=A4, leftMargin=20 * mm, rightMargin=20 * mm, topMargin=20 * mm, bottomMargin=20 * mm,
-        title=f"Rechnung {invoice.invoice_number}", author=seller.name, subject=f"Rechnung {invoice.invoice_number}",
-    )
-    doc.build(story)
-    return buffer.getvalue()
 
 
 async def normalize_to_pdfa(content: bytes) -> Tuple[bytes, bool]:
